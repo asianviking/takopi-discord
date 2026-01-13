@@ -1,4 +1,4 @@
-# dakopi
+# takopi-discord
 
 Discord transport plugin for [takopi](https://github.com/banteg/takopi) - "he just wants to help-pi... on Discord!"
 
@@ -30,11 +30,11 @@ TAKOPI (category)
 ## Installation
 
 ```bash
-# Install dakopi
-pip install dakopi
+# Install takopi-discord
+pip install takopi-discord
 
 # Or with uv
-uv pip install dakopi
+uv pip install takopi-discord
 
 # Verify the transport is loaded
 takopi plugins --load

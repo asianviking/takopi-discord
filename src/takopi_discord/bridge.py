@@ -24,7 +24,7 @@ __all__ = [
     "DiscordTransport",
 ]
 
-CANCEL_BUTTON_ID = "dakopi:cancel"
+CANCEL_BUTTON_ID = "takopi-discord:cancel"
 
 
 class CancelView(discord.ui.View):

@@ -64,7 +64,7 @@ def _build_startup_message(
     project_list = ", ".join(project_aliases) if project_aliases else "none"
 
     return (
-        f"\N{OCTOPUS} **dakopi is ready**\n\n"
+        f"\N{OCTOPUS} **takopi-discord is ready**\n\n"
         f"default: `{runtime.default_engine}`  \n"
         f"agents: `{engine_list}`  \n"
         f"projects: `{project_list}`  \n"

@@ -242,7 +242,7 @@ def interactive_setup(*, force: bool) -> bool:
     with suppress_logs():
         panel = Panel(
             "let's set up your discord bot.",
-            title="welcome to dakopi!",
+            title="welcome to takopi-discord!",
             border_style="blue",
             padding=(1, 2),
             expand=False,
@@ -368,7 +368,7 @@ def interactive_setup(*, force: bool) -> bool:
         console.print(f"  config saved to {_display_path(config_path)}")
 
         done_panel = Panel(
-            "setup complete. run 'takopi run' to start dakopi!",
+            "setup complete. run 'takopi run' to start takopi-discord!",
             border_style="green",
             padding=(1, 2),
             expand=False,

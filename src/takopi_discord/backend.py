@@ -89,9 +89,7 @@ class DiscordBackend(TransportBackend):
     def interactive_setup(self, *, force: bool) -> bool:
         return interactive_setup(force=force)
 
-    def lock_token(
-        self, *, transport_config: object, _config_path: Path
-    ) -> str | None:
+    def lock_token(self, *, transport_config: object, _config_path: Path) -> str | None:
         settings = _get_discord_settings(transport_config)
         return settings.get("bot_token")
 

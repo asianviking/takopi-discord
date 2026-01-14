@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 import discord
@@ -34,8 +34,12 @@ class CancelView(discord.ui.View):
         super().__init__(timeout=None)
         self._on_cancel = on_cancel
 
-    @discord.ui.button(label="cancel", style=discord.ButtonStyle.secondary, custom_id=CANCEL_BUTTON_ID)
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(
+        label="cancel", style=discord.ButtonStyle.secondary, custom_id=CANCEL_BUTTON_ID
+    )
+    async def cancel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
         if self._on_cancel is not None:
             await self._on_cancel(interaction)
         else:

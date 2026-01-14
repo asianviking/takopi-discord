@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import anyio
@@ -12,7 +11,7 @@ from takopi.logging import get_logger
 from takopi.markdown import MarkdownParts
 from takopi.model import ResumeToken
 from takopi.runner_bridge import RunningTasks
-from takopi.transport import MessageRef, RenderedMessage, SendOptions
+from takopi.transport import MessageRef, RenderedMessage
 
 from .bridge import CANCEL_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
 from .handlers import (
@@ -61,7 +60,7 @@ async def run_main_loop(
 
     def get_running_task(channel_id: int) -> int | None:
         """Get the message ID of a running task in a channel."""
-        for key, task in running_tasks.items():
+        for key in running_tasks:
             if key[0] == channel_id:
                 return key[1]
         return None

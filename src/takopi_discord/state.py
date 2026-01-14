@@ -65,9 +65,7 @@ class DiscordStateStore:
             self._state = DiscordState()
             return
         try:
-            payload = msgspec.json.decode(
-                self._path.read_bytes(), type=DiscordState
-            )
+            payload = msgspec.json.decode(self._path.read_bytes(), type=DiscordState)
         except Exception:  # noqa: BLE001
             self._state = DiscordState()
             return

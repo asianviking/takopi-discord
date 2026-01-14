@@ -144,7 +144,7 @@ async def _validate_discord_token(token: str) -> tuple[str, str] | None:
                 await client.start(token)
             except discord.LoginFailure:
                 ready_event.set()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 ready_event.set()
 
         async with anyio.create_task_group() as tg:
@@ -258,7 +258,9 @@ def interactive_setup(*, force: bool) -> bool:
             console.print("  2. click 'New Application' and give it a name")
             console.print("  3. go to 'Bot' section and click 'Reset Token'")
             console.print("  4. copy the token")
-            console.print("  5. enable 'Message Content Intent' under Privileged Gateway Intents")
+            console.print(
+                "  5. enable 'Message Content Intent' under Privileged Gateway Intents"
+            )
             console.print("")
 
         token_info = _prompt_token(console)
@@ -277,7 +279,9 @@ def interactive_setup(*, force: bool) -> bool:
 
         # Optional: prompt for guild ID
         guild_id: int | None = None
-        use_guild = _confirm(console, "restrict bot to a specific server?", default=False)
+        use_guild = _confirm(
+            console, "restrict bot to a specific server?", default=False
+        )
         if use_guild:
             guild_id_str = questionary.text("enter server (guild) ID:").ask()
             if guild_id_str:

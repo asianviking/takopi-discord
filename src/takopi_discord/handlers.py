@@ -8,7 +8,6 @@ import discord
 from discord import app_commands
 
 if TYPE_CHECKING:
-    from .bridge import DiscordBridgeConfig
     from .client import DiscordBotClient
     from .mapping import CategoryChannelMapper
     from .state import DiscordStateStore
@@ -89,10 +88,7 @@ def register_slash_commands(
         # Get branch from channel name if not provided
         if branch is None:
             mapping = mapper.get_channel_mapping(guild_id, channel_id)
-            if mapping is not None:
-                branch = mapping.branch
-            else:
-                branch = "main"
+            branch = mapping.branch if mapping is not None else "main"
 
         from .types import DiscordChannelContext
 

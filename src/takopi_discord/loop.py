@@ -17,6 +17,7 @@ from takopi.transport import MessageRef, RenderedMessage
 from .bridge import CANCEL_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
 from .handlers import (
     extract_prompt_from_message,
+    parse_branch_prefix,
     register_slash_commands,
     should_process_message,
 )
@@ -60,7 +61,6 @@ async def run_main_loop(
 
     logger.info(
         "loop.config",
-        session_mode=cfg.session_mode,
         has_state_store=state_store is not None,
         guild_id=cfg.guild_id,
     )
@@ -175,10 +175,9 @@ async def run_main_loop(
                         guild_id=guild_id,
                         channel_id=channel_id,
                         thread_id=thread_id,
-                        session_mode=cfg.session_mode,
                         token_preview=new_token.value[:20] + "..." if len(new_token.value) > 20 else new_token.value,
                     )
-                    if state_store and guild_id and cfg.session_mode == "chat":
+                    if state_store and guild_id:
                         engine_id = cfg.runtime.default_engine or "claude"
                         # Save to thread_id if present, otherwise channel_id
                         # This matches the retrieval logic in handle_message
@@ -197,7 +196,6 @@ async def run_main_loop(
                             "on_thread_known.not_saving",
                             has_state_store=state_store is not None,
                             guild_id=guild_id,
-                            session_mode=cfg.session_mode,
                         )
 
                 await takopi_handle_message(
@@ -258,10 +256,16 @@ async def run_main_loop(
 
         print(f"[DEBUG handle_message] about to get context from state_store", flush=True)
         # Get context from state or infer from channel
+        # For threads, check thread-specific context first (set via @branch prefix)
         context_data: DiscordChannelContext | None = None
         if state_store and guild_id:
-            print(f"[DEBUG handle_message] calling state_store.get_context(guild_id={guild_id}, channel_id={channel_id})", flush=True)
-            context_data = await state_store.get_context(guild_id, channel_id)
+            if thread_id:
+                # Check if thread has its own bound context (from @branch prefix)
+                context_data = await state_store.get_context(guild_id, thread_id)
+                print(f"[DEBUG handle_message] got thread context: {context_data}", flush=True)
+            if context_data is None:
+                print(f"[DEBUG handle_message] calling state_store.get_context(guild_id={guild_id}, channel_id={channel_id})", flush=True)
+                context_data = await state_store.get_context(guild_id, channel_id)
 
         print(f"[DEBUG handle_message] got context_data from state_store: {context_data}", flush=True)
         if context_data is None and guild_id:
@@ -282,14 +286,55 @@ async def run_main_loop(
         # Extract prompt
         prompt = extract_prompt_from_message(message, cfg.bot.user)
         print(f"[DEBUG handle_message] extracted prompt: '{prompt[:50] if prompt else ''}'", flush=True)
+
+        # Parse @branch prefix (only for new messages in channels, not in existing threads)
+        branch_override: str | None = None
+        if thread_id is None:
+            branch_override, prompt = parse_branch_prefix(prompt)
+            if branch_override:
+                print(f"[DEBUG handle_message] parsed branch override: {branch_override}", flush=True)
+                logger.info("branch.override", branch=branch_override)
+
         if not prompt.strip():
             print(f"[DEBUG handle_message] empty prompt, returning", flush=True)
             return
 
+        # Apply branch override to context
+        if branch_override:
+            from takopi.context import RunContext
+
+            if run_context:
+                # Override branch but keep project from channel
+                run_context = RunContext(
+                    project=run_context.project,
+                    branch=branch_override,
+                )
+            elif context_data:
+                run_context = RunContext(
+                    project=context_data.project,
+                    branch=branch_override,
+                )
+            else:
+                # No project bound - require /bind first
+                logger.warning(
+                    "branch.no_project",
+                    branch=branch_override,
+                    channel_id=channel_id,
+                )
+                await message.reply(
+                    f"Cannot use `@{branch_override}` - this channel has no project bound.\n"
+                    "Use `/bind <project>` first to bind this channel to a project.",
+                    mention_author=False,
+                )
+                return
+
         # Create thread for the response if not already in a thread
         if thread_id is None and isinstance(message.channel, discord.TextChannel):
-            # Create a thread from the user's message
-            thread_name = prompt[:100] if len(prompt) <= 100 else prompt[:97] + "..."
+            # Thread name is just the branch if @branch was used, otherwise prompt snippet
+            if branch_override:
+                thread_name = branch_override
+            else:
+                thread_name = prompt[:100] if len(prompt) <= 100 else prompt[:97] + "..."
             created_thread_id = await cfg.bot.create_thread(
                 channel_id=channel_id,
                 message_id=message.id,
@@ -305,20 +350,33 @@ async def run_main_loop(
                     name=thread_name,
                 )
 
-        # Get resume token if in stateful mode
+                # Save thread context if @branch was used
+                if branch_override and state_store and guild_id and run_context:
+                    thread_context = DiscordChannelContext(
+                        project=run_context.project,
+                        branch=branch_override,
+                    )
+                    await state_store.set_context(guild_id, thread_id, thread_context)
+                    logger.info(
+                        "thread.context_saved",
+                        thread_id=thread_id,
+                        project=run_context.project,
+                        branch=branch_override,
+                    )
+
+        # Get resume token to maintain conversation continuity
         # For threads, use thread_id as the session key to maintain conversation continuity
         # within the thread (regardless of which specific message is being replied to)
         resume_token: ResumeToken | None = None
         session_key = thread_id if thread_id else channel_id
-        print(f"[DEBUG handle_message] session_mode={cfg.session_mode} session_key={session_key}", flush=True)
+        print(f"[DEBUG handle_message] session_key={session_key}", flush=True)
         logger.debug(
             "session.lookup",
             guild_id=guild_id,
             session_key=session_key,
-            session_mode=cfg.session_mode,
             has_state_store=state_store is not None,
         )
-        if state_store and guild_id and cfg.session_mode == "chat":
+        if state_store and guild_id:
             engine_id = cfg.runtime.default_engine or "claude"
             print(f"[DEBUG handle_message] about to call state_store.get_session(guild_id={guild_id}, session_key={session_key}, engine_id={engine_id})", flush=True)
             try:

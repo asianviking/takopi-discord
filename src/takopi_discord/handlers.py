@@ -193,3 +193,30 @@ def extract_prompt_from_message(
         content = content.replace(f"<@!{bot_user.id}>", "").strip()
 
     return content
+
+
+def parse_branch_prefix(content: str) -> tuple[str | None, str]:
+    """Parse @branch prefix from message content.
+
+    Returns (branch, remaining_prompt).
+
+    Examples:
+        "@chore/hello fix the bug" -> ("chore/hello", "fix the bug")
+        "@feat-login" -> ("feat-login", "")
+        "hello world" -> (None, "hello world")
+    """
+    content = content.strip()
+    if not content.startswith("@"):
+        return None, content
+
+    # Find the end of the branch token (first whitespace or end of string)
+    parts = content[1:].split(None, 1)  # Split on whitespace, max 2 parts
+    if not parts:
+        return None, content
+
+    branch = parts[0]
+    if not branch:
+        return None, content
+
+    remaining = parts[1] if len(parts) > 1 else ""
+    return branch, remaining.strip()

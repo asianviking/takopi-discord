@@ -21,10 +21,9 @@ from .handlers import (
     register_slash_commands,
     should_process_message,
 )
-from .mapping import CategoryChannelMapper
 from .render import prepare_discord
 from .state import DiscordStateStore
-from .types import DiscordChannelContext
+from .types import DiscordChannelContext, DiscordThreadContext
 
 if TYPE_CHECKING:
     from takopi.context import RunContext
@@ -56,7 +55,6 @@ async def run_main_loop(
     """Run the main Discord event loop."""
     running_tasks: RunningTasks = {}
     state_store = DiscordStateStore(cfg.runtime.config_path)
-    mapper = CategoryChannelMapper(cfg.bot)
     _ = cast(DiscordTransport, cfg.exec_cfg.transport)  # Used for type checking only
 
     logger.info(
@@ -85,7 +83,6 @@ async def run_main_loop(
     register_slash_commands(
         cfg.bot,
         state_store=state_store,
-        mapper=mapper,
         get_running_task=get_running_task,
         cancel_task=cancel_task,
     )
@@ -270,41 +267,53 @@ async def run_main_loop(
         print(
             "[DEBUG handle_message] about to get context from state_store", flush=True
         )
-        # Get context from state or infer from channel
+        # Get context from state
         # For threads, check thread-specific context first (set via @branch prefix)
-        context_data: DiscordChannelContext | None = None
+        # Thread context has a specific branch; channel context uses worktree_base
+        channel_context: DiscordChannelContext | None = None
+        thread_context: DiscordThreadContext | None = None
+
         if state_store and guild_id:
             if thread_id:
                 # Check if thread has its own bound context (from @branch prefix)
-                context_data = await state_store.get_context(guild_id, thread_id)
+                ctx = await state_store.get_context(guild_id, thread_id)
+                if isinstance(ctx, DiscordThreadContext):
+                    thread_context = ctx
                 print(
-                    f"[DEBUG handle_message] got thread context: {context_data}",
+                    f"[DEBUG handle_message] got thread context: {thread_context}",
                     flush=True,
                 )
-            if context_data is None:
-                print(
-                    f"[DEBUG handle_message] calling state_store.get_context(guild_id={guild_id}, channel_id={channel_id})",
-                    flush=True,
-                )
-                context_data = await state_store.get_context(guild_id, channel_id)
+
+            # Always get channel context for project info and defaults
+            print(
+                f"[DEBUG handle_message] calling state_store.get_context(guild_id={guild_id}, channel_id={channel_id})",
+                flush=True,
+            )
+            ctx = await state_store.get_context(guild_id, channel_id)
+            if isinstance(ctx, DiscordChannelContext):
+                channel_context = ctx
 
         print(
-            f"[DEBUG handle_message] got context_data from state_store: {context_data}",
+            f"[DEBUG handle_message] channel_context={channel_context}, thread_context={thread_context}",
             flush=True,
         )
-        if context_data is None and guild_id:
-            mapping = mapper.get_channel_mapping(guild_id, channel_id)
-            if mapping:
-                context_data = mapper.get_context_from_mapping(mapping)
 
-        # Build run context if we have channel context
+        # Determine effective context: thread context takes priority, otherwise use channel's worktree_base
         run_context: RunContext | None = None
-        if context_data:
+        if thread_context:
             from takopi.context import RunContext
 
             run_context = RunContext(
-                project=context_data.project,
-                branch=context_data.branch,
+                project=thread_context.project,
+                branch=thread_context.branch,
+            )
+        elif channel_context:
+            from takopi.context import RunContext
+
+            # Use worktree_base as the default branch when no @branch specified
+            run_context = RunContext(
+                project=channel_context.project,
+                branch=channel_context.worktree_base,
             )
 
         # Extract prompt
@@ -334,15 +343,10 @@ async def run_main_loop(
         if branch_override:
             from takopi.context import RunContext
 
-            if run_context:
+            if channel_context:
                 # Override branch but keep project from channel
                 run_context = RunContext(
-                    project=run_context.project,
-                    branch=branch_override,
-                )
-            elif context_data:
-                run_context = RunContext(
-                    project=context_data.project,
+                    project=channel_context.project,
                     branch=branch_override,
                 )
             else:
@@ -384,16 +388,18 @@ async def run_main_loop(
                 )
 
                 # Save thread context if @branch was used
-                if branch_override and state_store and guild_id and run_context:
-                    thread_context = DiscordChannelContext(
-                        project=run_context.project,
+                if branch_override and state_store and guild_id and channel_context:
+                    new_thread_context = DiscordThreadContext(
+                        project=channel_context.project,
                         branch=branch_override,
+                        worktrees_dir=channel_context.worktrees_dir,
+                        default_engine=channel_context.default_engine,
                     )
-                    await state_store.set_context(guild_id, thread_id, thread_context)
+                    await state_store.set_context(guild_id, thread_id, new_thread_context)
                     logger.info(
                         "thread.context_saved",
                         thread_id=thread_id,
-                        project=run_context.project,
+                        project=channel_context.project,
                         branch=branch_override,
                     )
 
@@ -426,8 +432,16 @@ async def run_main_loop(
             session_key=session_key,
             has_state_store=state_store is not None,
         )
-        if state_store and guild_id:
+
+        # Get engine_id from context (thread or channel), fallback to config
+        if thread_context:
+            engine_id = thread_context.default_engine
+        elif channel_context:
+            engine_id = channel_context.default_engine
+        else:
             engine_id = cfg.runtime.default_engine or "claude"
+
+        if state_store and guild_id:
             print(
                 f"[DEBUG handle_message] about to call state_store.get_session(guild_id={guild_id}, session_key={session_key}, engine_id={engine_id})",
                 flush=True,

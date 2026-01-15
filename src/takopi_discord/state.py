@@ -9,15 +9,17 @@ from typing import Any
 import anyio
 import msgspec
 
-from .types import DiscordChannelContext
+from .types import DiscordChannelContext, DiscordThreadContext
 
 STATE_VERSION = 1
 
 
 class DiscordChannelStateData(msgspec.Struct):
-    """State data for a single channel."""
+    """State data for a single channel or thread."""
 
-    context: dict[str, str] | None = None  # {"project": ..., "branch": ...}
+    # For channels: {"project", "worktrees_dir", "default_engine", "worktree_base"}
+    # For threads: {"project", "branch", "worktrees_dir", "default_engine"}
+    context: dict[str, str] | None = None
     sessions: dict[str, str] | None = None  # engine_id -> resume_token
 
 
@@ -93,8 +95,12 @@ class DiscordStateStore:
 
     async def get_context(
         self, guild_id: int | None, channel_id: int
-    ) -> DiscordChannelContext | None:
-        """Get the context for a channel."""
+    ) -> DiscordChannelContext | DiscordThreadContext | None:
+        """Get the context for a channel or thread.
+
+        Returns DiscordChannelContext for channels (no branch),
+        or DiscordThreadContext for threads (with branch).
+        """
         async with self._lock:
             self._reload_if_needed()
             key = self._channel_key(guild_id, channel_id)
@@ -103,18 +109,35 @@ class DiscordStateStore:
                 return None
             ctx = channel_data.context
             project = ctx.get("project")
-            branch = ctx.get("branch")
-            if project is None or branch is None:
+            if project is None:
                 return None
-            return DiscordChannelContext(project=project, branch=branch)
+
+            # Check if this is a thread context (has branch) or channel context
+            branch = ctx.get("branch")
+            if branch is not None:
+                # Thread context
+                return DiscordThreadContext(
+                    project=project,
+                    branch=branch,
+                    worktrees_dir=ctx.get("worktrees_dir", ".worktrees"),
+                    default_engine=ctx.get("default_engine", "claude"),
+                )
+            else:
+                # Channel context
+                return DiscordChannelContext(
+                    project=project,
+                    worktrees_dir=ctx.get("worktrees_dir", ".worktrees"),
+                    default_engine=ctx.get("default_engine", "claude"),
+                    worktree_base=ctx.get("worktree_base", "master"),
+                )
 
     async def set_context(
         self,
         guild_id: int | None,
         channel_id: int,
-        context: DiscordChannelContext | None,
+        context: DiscordChannelContext | DiscordThreadContext | None,
     ) -> None:
-        """Set the context for a channel."""
+        """Set the context for a channel or thread."""
         async with self._lock:
             self._reload_if_needed()
             key = self._channel_key(guild_id, channel_id)
@@ -122,10 +145,21 @@ class DiscordStateStore:
                 self._state.channels[key] = DiscordChannelStateData()
             if context is None:
                 self._state.channels[key].context = None
-            else:
+            elif isinstance(context, DiscordThreadContext):
+                # Thread context (with branch)
                 self._state.channels[key].context = {
                     "project": context.project,
                     "branch": context.branch,
+                    "worktrees_dir": context.worktrees_dir,
+                    "default_engine": context.default_engine,
+                }
+            else:
+                # Channel context (no branch)
+                self._state.channels[key].context = {
+                    "project": context.project,
+                    "worktrees_dir": context.worktrees_dir,
+                    "default_engine": context.default_engine,
+                    "worktree_base": context.worktree_base,
                 }
             self._save()
 

@@ -44,15 +44,37 @@ class DiscordInteraction:
 
 @dataclass(frozen=True, slots=True)
 class DiscordChannelContext:
-    """Context for a Discord channel mapped to a project/branch."""
+    """Context for a Discord channel bound to a project.
+
+    Channels are bound to a project with configuration for worktrees.
+    The worktree_base is the default branch used when no @branch is specified.
+    """
+
+    project: str
+    worktrees_dir: str = ".worktrees"
+    default_engine: str = "claude"
+    worktree_base: str = "master"
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordThreadContext:
+    """Context for a Discord thread bound to a specific branch.
+
+    Threads are created via @branch prefix and work on a specific branch
+    (as a worktree from the channel's worktree_base).
+    """
 
     project: str
     branch: str
+    worktrees_dir: str = ".worktrees"
+    default_engine: str = "claude"
 
 
 @dataclass(frozen=True, slots=True)
 class DiscordChannelState:
-    """State for a Discord channel."""
+    """State for a Discord channel or thread."""
 
-    context: DiscordChannelContext | None = None
+    # For channels: DiscordChannelContext (project config, no branch)
+    # For threads: DiscordThreadContext (project + specific branch)
+    context: DiscordChannelContext | DiscordThreadContext | None = None
     sessions: dict[str, str] | None = None  # engine_id -> resume_token

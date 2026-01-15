@@ -9,7 +9,6 @@ from discord import app_commands
 
 if TYPE_CHECKING:
     from .client import DiscordBotClient
-    from .mapping import CategoryChannelMapper
     from .state import DiscordStateStore
 
 
@@ -17,7 +16,6 @@ def register_slash_commands(
     bot: DiscordBotClient,
     *,
     state_store: DiscordStateStore,
-    mapper: CategoryChannelMapper,
     get_running_task: callable,
     cancel_task: callable,
 ) -> None:
@@ -27,6 +25,8 @@ def register_slash_commands(
     @tree.command(name="status", description="Show current channel context and status")
     async def status_command(interaction: discord.Interaction) -> None:
         """Show current channel context and running tasks."""
+        from .types import DiscordThreadContext
+
         if interaction.guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server.", ephemeral=True
@@ -36,12 +36,8 @@ def register_slash_commands(
         channel_id = interaction.channel_id
         guild_id = interaction.guild.id
 
-        # Get context from state or infer from channel
+        # Get context from state
         context = await state_store.get_context(guild_id, channel_id)
-        if context is None:
-            mapping = mapper.get_channel_mapping(guild_id, channel_id)
-            if mapping is not None:
-                context = mapper.get_context_from_mapping(mapping)
 
         if context is None:
             await interaction.response.send_message(
@@ -57,23 +53,43 @@ def register_slash_commands(
         if running is not None:
             status_line = f"running (message #{running})"
 
-        message = (
-            f"**Channel Status**\n"
-            f"- Project: `{context.project}`\n"
-            f"- Branch: `{context.branch}`\n"
-            f"- Status: {status_line}"
-        )
+        # Format message based on context type
+        if isinstance(context, DiscordThreadContext):
+            # Thread context (has specific branch)
+            message = (
+                f"**Thread Status**\n"
+                f"- Project: `{context.project}`\n"
+                f"- Branch: `{context.branch}`\n"
+                f"- Worktrees dir: `{context.worktrees_dir}`\n"
+                f"- Engine: `{context.default_engine}`\n"
+                f"- Status: {status_line}"
+            )
+        else:
+            # Channel context (no specific branch, uses worktree_base as default)
+            message = (
+                f"**Channel Status**\n"
+                f"- Project: `{context.project}`\n"
+                f"- Default branch: `{context.worktree_base}`\n"
+                f"- Worktrees dir: `{context.worktrees_dir}`\n"
+                f"- Engine: `{context.default_engine}`\n"
+                f"- Status: {status_line}\n\n"
+                f"_Use `@branch-name` to create a thread for a specific branch._"
+            )
         await interaction.response.send_message(message, ephemeral=True)
 
     @tree.command(name="bind", description="Bind this channel to a project")
     @app_commands.describe(
-        project="The project name to bind to this channel",
-        branch="Optional branch override (defaults to channel name)",
+        project="The project path (e.g., ~/dev/myproject)",
+        worktrees_dir="Directory for git worktrees (default: .worktrees)",
+        default_engine="Default engine to use (default: claude)",
+        worktree_base="Base branch for worktrees and default working branch (default: master)",
     )
     async def bind_command(
         interaction: discord.Interaction,
         project: str,
-        branch: str | None = None,
+        worktrees_dir: str = ".worktrees",
+        default_engine: str = "claude",
+        worktree_base: str = "master",
     ) -> None:
         """Bind a channel to a project."""
         if interaction.guild is None:
@@ -85,18 +101,22 @@ def register_slash_commands(
         channel_id = interaction.channel_id
         guild_id = interaction.guild.id
 
-        # Get branch from channel name if not provided
-        if branch is None:
-            mapping = mapper.get_channel_mapping(guild_id, channel_id)
-            branch = mapping.branch if mapping is not None else "main"
-
         from .types import DiscordChannelContext
 
-        context = DiscordChannelContext(project=project, branch=branch)
+        context = DiscordChannelContext(
+            project=project,
+            worktrees_dir=worktrees_dir,
+            default_engine=default_engine,
+            worktree_base=worktree_base,
+        )
         await state_store.set_context(guild_id, channel_id, context)
 
         await interaction.response.send_message(
-            f"Bound channel to project `{project}` branch `{branch}`.",
+            f"Bound channel to project `{project}`\n"
+            f"- Default branch: `{worktree_base}`\n"
+            f"- Worktrees dir: `{worktrees_dir}`\n"
+            f"- Engine: `{default_engine}`\n\n"
+            f"_Use `@branch-name` to create threads for specific branches._",
             ephemeral=True,
         )
 

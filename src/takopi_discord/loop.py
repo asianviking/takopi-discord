@@ -467,7 +467,11 @@ async def run_main_loop(
             return
         custom_id = interaction.data.get("custom_id")
         if custom_id == CANCEL_BUTTON_ID:
-            await transport.handle_cancel_interaction(interaction)
+            # Get the channel where the cancel was clicked
+            channel_id = interaction.channel_id
+            if channel_id is not None:
+                await cancel_task(channel_id)
+            await interaction.response.defer()
 
     # Auto-join new threads so we receive messages from them
     @cfg.bot.client.event

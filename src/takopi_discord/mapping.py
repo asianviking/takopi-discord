@@ -79,16 +79,14 @@ class CategoryChannelMapper:
         if not isinstance(category, discord.CategoryChannel):
             return []
 
-        mappings: list[ChannelMapping] = []
-        for channel in category.channels:
-            if isinstance(channel, discord.TextChannel):
-                mappings.append(
-                    ChannelMapping(
-                        guild_id=guild_id,
-                        category_id=category_id,
-                        category_name=category.name,
-                        channel_id=channel.id,
-                        channel_name=channel.name,
-                    )
-                )
-        return mappings
+        return [
+            ChannelMapping(
+                guild_id=guild_id,
+                category_id=category_id,
+                category_name=category.name,
+                channel_id=channel.id,
+                channel_name=channel.name,
+            )
+            for channel in category.channels
+            if isinstance(channel, discord.TextChannel)
+        ]

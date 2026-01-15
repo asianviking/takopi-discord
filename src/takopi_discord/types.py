@@ -20,7 +20,6 @@ class DiscordIncomingMessage:
     thread_id: int | None = None
     reply_to_message_id: int | None = None
     reply_to_content: str | None = None
-    category_id: int | None = None
     raw: dict[str, Any] | None = None
 
 

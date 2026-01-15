@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 from typing import TYPE_CHECKING, cast
 
 import anyio
@@ -57,10 +58,28 @@ async def run_main_loop(
     state_store = DiscordStateStore(cfg.runtime.config_path)
     _ = cast(DiscordTransport, cfg.exec_cfg.transport)  # Used for type checking only
 
+    # Initialize voice manager if OpenAI API key is available
+    voice_manager = None
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if openai_api_key:
+        try:
+            from openai import AsyncOpenAI
+
+            from .voice import VoiceManager
+
+            openai_client = AsyncOpenAI(api_key=openai_api_key)
+            voice_manager = VoiceManager(cfg.bot, openai_client)
+            logger.info("voice.enabled", has_openai_key=True)
+        except ImportError:
+            logger.warning("voice.disabled", reason="openai package not installed")
+    else:
+        logger.info("voice.disabled", reason="OPENAI_API_KEY not set")
+
     logger.info(
         "loop.config",
         has_state_store=state_store is not None,
         guild_id=cfg.guild_id,
+        voice_enabled=voice_manager is not None,
     )
 
     def get_running_task(channel_id: int) -> int | None:
@@ -85,6 +104,7 @@ async def run_main_loop(
         state_store=state_store,
         get_running_task=get_running_task,
         cancel_task=cancel_task,
+        voice_manager=voice_manager,
     )
 
     async def run_job(
@@ -395,7 +415,9 @@ async def run_main_loop(
                         worktrees_dir=channel_context.worktrees_dir,
                         default_engine=channel_context.default_engine,
                     )
-                    await state_store.set_context(guild_id, thread_id, new_thread_context)
+                    await state_store.set_context(
+                        guild_id, thread_id, new_thread_context
+                    )
                     logger.info(
                         "thread.context_saved",
                         thread_id=thread_id,
@@ -569,6 +591,84 @@ async def run_main_loop(
         with contextlib.suppress(discord.HTTPException):
             await thread.join()
             logger.debug("thread.auto_joined", thread_id=thread.id, name=thread.name)
+
+    # Handle voice state updates (users joining/leaving voice channels)
+    @cfg.bot.client.event
+    async def on_voice_state_update(
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        if voice_manager is not None:
+            await voice_manager.handle_voice_state_update(member, before, after)
+
+    # Set up voice message handler if voice is enabled
+    if voice_manager is not None:
+
+        async def handle_voice_message(
+            guild_id: int,
+            text_channel_id: int,
+            transcript: str,
+            user_name: str,
+            project: str,
+            branch: str,
+        ) -> str | None:
+            """Handle a transcribed voice message."""
+            from takopi.context import RunContext
+
+            logger.info(
+                "voice.message",
+                guild_id=guild_id,
+                text_channel_id=text_channel_id,
+                user_name=user_name,
+                transcript_length=len(transcript),
+            )
+
+            # Post the transcribed message to the text channel
+            transport = cast(DiscordTransport, cfg.exec_cfg.transport)
+            await transport.send(
+                channel_id=text_channel_id,
+                message=RenderedMessage(
+                    text=f"**{user_name}** (voice): {transcript}",
+                    extra={},
+                ),
+            )
+
+            # Build run context
+            run_context = RunContext(project=project, branch=branch)
+
+            # Get resume token for the text channel
+            resume_token: ResumeToken | None = None
+            engine_id = cfg.runtime.default_engine or "claude"
+            token_str = await state_store.get_session(
+                guild_id, text_channel_id, engine_id
+            )
+            if token_str:
+                resume_token = ResumeToken(engine=engine_id, value=token_str)
+
+            # Use run_job to process the voice message
+            # Generate a unique message ID for voice messages
+            import time
+
+            voice_msg_id = int(time.time() * 1000)
+
+            await run_job(
+                channel_id=text_channel_id,
+                user_msg_id=voice_msg_id,
+                text=transcript,
+                resume_token=resume_token,
+                context=run_context,
+                thread_id=None,
+                reply_ref=None,
+                guild_id=guild_id,
+            )
+
+            # Note: For now, return None as TTS response.
+            # The text response is sent to the text channel via run_job.
+            # TTS could be enhanced by capturing the response text.
+            return None
+
+        voice_manager.set_message_handler(handle_voice_message)
 
     # Start the bot
     await cfg.bot.start()

@@ -37,6 +37,8 @@ class DiscordBotClient:
         intents.members = False
         # Required for receiving messages in threads
         intents.messages = True
+        # Required for voice channel functionality
+        intents.voice_states = True
         self._client = discord.Client(intents=intents)
         self._tree = app_commands.CommandTree(self._client)
         self._ready_event = asyncio.Event()

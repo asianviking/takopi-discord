@@ -10,6 +10,7 @@ from discord import app_commands
 if TYPE_CHECKING:
     from .client import DiscordBotClient
     from .state import DiscordStateStore
+    from .voice import VoiceManager
 
 
 def register_slash_commands(
@@ -18,6 +19,7 @@ def register_slash_commands(
     state_store: DiscordStateStore,
     get_running_task: callable,
     cancel_task: callable,
+    voice_manager: VoiceManager | None = None,
 ) -> None:
     """Register slash commands with the bot."""
     tree = bot.tree
@@ -159,6 +161,134 @@ def register_slash_commands(
         await interaction.response.send_message(
             "Cancellation requested.", ephemeral=True
         )
+
+    # Voice commands (only register if voice_manager is provided)
+    if voice_manager is not None:
+        _register_voice_commands(
+            bot, state_store=state_store, voice_manager=voice_manager
+        )
+
+
+def _register_voice_commands(
+    bot: DiscordBotClient,
+    *,
+    state_store: DiscordStateStore,
+    voice_manager: VoiceManager,
+) -> None:
+    """Register voice-related slash commands."""
+    tree = bot.tree
+
+    @tree.command(
+        name="voice",
+        description="Create a voice channel for this thread/channel and join it",
+    )
+    async def voice_command(interaction: discord.Interaction) -> None:
+        """Create a voice channel bound to the current thread/channel's project context.
+
+        If run in a thread, inherits the thread's project and branch.
+        If run in a channel, inherits the channel's project and base branch.
+        """
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id
+        channel = interaction.channel
+
+        # Determine the text channel ID and get context
+        text_channel_id = interaction.channel_id
+        if text_channel_id is None:
+            await interaction.response.send_message(
+                "Could not determine the channel.", ephemeral=True
+            )
+            return
+
+        # Get context - check thread first, then parent channel
+        context = None
+
+        if isinstance(channel, discord.Thread):
+            # Try thread-specific context first
+            context = await state_store.get_context(guild_id, channel.id)
+            if context is None and channel.parent_id:
+                # Fall back to parent channel context
+                context = await state_store.get_context(guild_id, channel.parent_id)
+        else:
+            context = await state_store.get_context(guild_id, text_channel_id)
+
+        if context is None:
+            await interaction.response.send_message(
+                "This channel/thread is not bound to a project.\n"
+                "Use `/bind <project>` first, then `/voice`.",
+                ephemeral=True,
+            )
+            return
+
+        # Defer since creating channel and joining might take a moment
+        await interaction.response.defer(ephemeral=True)
+
+        # Determine the branch name for the voice channel
+        from .types import DiscordThreadContext
+
+        if isinstance(context, DiscordThreadContext):
+            branch = context.branch
+        else:
+            branch = context.worktree_base
+
+        try:
+            # Create a temporary voice channel
+            # Name it after the thread/branch
+            if isinstance(channel, discord.Thread):
+                voice_name = f"Voice: {channel.name[:90]}"
+            else:
+                voice_name = f"Voice: {branch}"
+
+            # Get the category of the current channel (if any) to create voice channel in same category
+            category = None
+            if isinstance(channel, discord.Thread) and channel.parent:
+                category = channel.parent.category
+            elif isinstance(channel, discord.TextChannel):
+                category = channel.category
+
+            voice_channel = await interaction.guild.create_voice_channel(
+                name=voice_name,
+                category=category,
+                reason=f"Voice session for {context.project}:{branch}",
+            )
+
+            # Join the voice channel
+            await voice_manager.join_channel(
+                voice_channel,
+                text_channel_id,  # Link back to the original text channel/thread
+                context.project,
+                branch,
+            )
+
+            await interaction.followup.send(
+                f"Created voice channel **{voice_channel.name}**.\n"
+                f"Project: `{context.project}` Branch: `{branch}`\n"
+                f"Join to start talking. The channel will be deleted when everyone leaves.",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I don't have permission to create voice channels.",
+                ephemeral=True,
+            )
+        except discord.ClientException as e:
+            await interaction.followup.send(
+                f"Failed to create/join voice channel: {e}",
+                ephemeral=True,
+            )
+
+    # Register /vc as an alias for /voice
+    @tree.command(
+        name="vc",
+        description="Create a voice channel for this thread/channel (alias for /voice)",
+    )
+    async def vc_command(interaction: discord.Interaction) -> None:
+        """Alias for /voice command."""
+        await voice_command.callback(interaction)
 
 
 def is_bot_mentioned(message: discord.Message, bot_user: discord.User | None) -> bool:

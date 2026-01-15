@@ -36,11 +36,17 @@ def _atomic_write_json(path: Path, data: Any) -> None:
     tmp_path.replace(path)
 
 
+DEFAULT_STATE_PATH = Path.home() / ".takopi" / "discord_state.json"
+
+
 class DiscordStateStore:
     """State store for Discord channel mappings and sessions."""
 
-    def __init__(self, config_path: Path) -> None:
-        self._path = config_path.parent / "discord_state.json"
+    def __init__(self, config_path: Path | None = None) -> None:
+        if config_path is not None:
+            self._path = config_path.parent / "discord_state.json"
+        else:
+            self._path = DEFAULT_STATE_PATH
         self._lock = anyio.Lock()
         self._loaded = False
         self._mtime_ns: int | None = None

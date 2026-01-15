@@ -227,6 +227,10 @@ class DiscordTransport:
         if sent is None:
             return None
 
+        # Delete the old message if replace is specified (mirrors Telegram behavior)
+        if options is not None and options.replace is not None:
+            await self.delete(ref=options.replace)
+
         if followups:
             await self._send_followups(
                 channel_id=cid,

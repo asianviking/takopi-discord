@@ -35,6 +35,8 @@ class DiscordBotClient:
         intents.message_content = True
         intents.guilds = True
         intents.members = False
+        # Required for receiving messages in threads
+        intents.messages = True
         self._client = discord.Client(intents=intents)
         self._tree = app_commands.CommandTree(self._client)
         self._ready_event = asyncio.Event()
@@ -47,10 +49,26 @@ class DiscordBotClient:
 
         @self._client.event
         async def on_message(message: discord.Message) -> None:
+            # Debug: print to stdout to bypass any logging issues
+            print(f"[DEBUG on_message] channel={type(message.channel).__name__} id={message.channel.id} author={message.author.name} content={message.content[:30] if message.content else '(empty)'}", flush=True)
+            # Debug: log ALL incoming messages at the client level
+            import logging
+            logging.getLogger("takopi.discord.client").debug(
+                "on_message raw: channel_type=%s channel_id=%s author=%s content_preview=%s",
+                type(message.channel).__name__,
+                message.channel.id,
+                message.author.name,
+                message.content[:30] if message.content else "(empty)",
+            )
             if message.author == self._client.user:
+                print(f"[DEBUG on_message] SKIPPED: bot's own message", flush=True)
                 return
             if self._message_handler is not None:
+                print(f"[DEBUG on_message] calling message_handler...", flush=True)
                 await self._message_handler(message)
+                print(f"[DEBUG on_message] message_handler returned", flush=True)
+            else:
+                print(f"[DEBUG on_message] NO message_handler set!", flush=True)
 
     @property
     def client(self) -> discord.Client:
@@ -118,9 +136,11 @@ class DiscordBotClient:
 
         reference = None
         if reply_to_message_id is not None:
+            # Use thread_id for the reference channel if we're in a thread,
+            # since that's where the original message actually exists
             reference = discord.MessageReference(
                 message_id=reply_to_message_id,
-                channel_id=channel_id,
+                channel_id=thread_id or channel_id,
             )
 
         try:
@@ -139,6 +159,20 @@ class DiscordBotClient:
                 thread_id=thread_id,
             )
         except discord.HTTPException:
+            # If send failed and we had a reference, retry without it
+            # This handles cases like new threads where the reply message
+            # might not be in the thread
+            if reference is not None:
+                try:
+                    kwargs.pop("reference", None)
+                    message = await channel.send(**kwargs)
+                    return SentMessage(
+                        message_id=message.id,
+                        channel_id=message.channel.id,
+                        thread_id=thread_id,
+                    )
+                except discord.HTTPException:
+                    return None
             return None
 
     async def edit_message(
@@ -226,6 +260,8 @@ class DiscordBotClient:
                 name=name,
                 auto_archive_duration=auto_archive_duration,
             )
+            # Join the thread so we receive messages from it
+            await thread.join()
             return thread.id
         except discord.HTTPException:
             return None

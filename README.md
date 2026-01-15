@@ -47,11 +47,14 @@ takopi plugins --load
 transport = "discord"
 
 [transports.discord]
-bot_token = "..."
-guild_id = 123456789  # optional, for single-guild mode
-message_overflow = "trim"  # or "split"
-session_mode = "stateless"  # or "chat"
+bot_token = "..."                # Required: Discord bot token
+guild_id = 123456789             # Optional: restrict bot to single server
+message_overflow = "trim"        # "trim" (default) or "split" for long messages
+session_mode = "stateless"       # "stateless" (default) or "chat"
+show_resume_line = true          # Show resume token in messages (default: true)
 ```
+
+State is automatically saved to `~/.takopi/discord_state.json`.
 
 ## Setup
 
@@ -64,9 +67,37 @@ session_mode = "stateless"  # or "chat"
 ## Slash Commands
 
 - `/status` - Show current channel context and status
-- `/bind <project>` - Bind channel to a project
+- `/bind <project> [branch]` - Bind channel to a project and optional branch
 - `/unbind` - Remove project binding
 - `/cancel` - Cancel running task
+
+## Message Features
+
+### @branch Prefix
+
+Override the branch for a single message by prefixing with `@branch-name`:
+
+```
+@feat/new-feature implement the login page
+@issue-123 fix the bug
+```
+
+This creates a new thread bound to the specified branch. Only works in channels, not existing threads.
+
+### Automatic Channel Mapping
+
+Channel names are automatically mapped to branches:
+- `#main` or `#master` → main/master branch
+- `#issue-123` or `#issue-123-description` → corresponding branch
+- `#feat-name` → feat-name branch
+- Other channels use their name as the branch
+
+### Thread Sessions
+
+- Messages automatically create threads for conversations
+- Each thread maintains its own session with resume tokens
+- Multiple sessions can run simultaneously across channels/threads
+- Cancel button appears on progress messages for task cancellation
 
 ## Discord Bot Permissions Required
 
@@ -93,6 +124,8 @@ uv pip install -e .
 # Run tests
 pytest
 ```
+
+Requires Python ≥ 3.14.
 
 ## License
 

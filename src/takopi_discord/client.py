@@ -44,9 +44,11 @@ class DiscordBotClient:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
-        intents.members = False
+        intents.members = True  # Required for voice channel member tracking
         # Required for receiving messages in threads
         intents.messages = True
+        # Required for voice channel functionality
+        intents.voice_states = True
         # Use discord.Bot which has built-in slash command support
         # debug_guilds ensures instant command sync to specific guilds
         debug_guilds = [self._guild_id] if self._guild_id else None

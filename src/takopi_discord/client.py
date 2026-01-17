@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,7 @@ class DiscordBotClient:
         # Defer bot creation until inside async context (Python 3.10+ compatibility)
         self._bot: discord.Bot | None = None
         self._ready_event: asyncio.Event | None = None
+        self._start_task: asyncio.Task[None] | None = None
 
     def _ensure_bot(self) -> discord.Bot:
         """Create the bot if not already created. Must be called from async context."""
@@ -44,9 +46,11 @@ class DiscordBotClient:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
-        intents.members = False
+        intents.members = True  # Required for voice channel member tracking
         # Required for receiving messages in threads
         intents.messages = True
+        # Required for voice channel functionality
+        intents.voice_states = True
         # Use discord.Bot which has built-in slash command support
         # debug_guilds ensures instant command sync to specific guilds
         debug_guilds = [self._guild_id] if self._guild_id else None
@@ -92,13 +96,29 @@ class DiscordBotClient:
         """Start the bot and wait until ready."""
         bot = self._ensure_bot()
         assert self._ready_event is not None
-        asyncio.create_task(bot.start(self._token))
+
+        async def _run_bot() -> None:
+            try:
+                await bot.start(self._token)
+            except asyncio.CancelledError:
+                pass
+            except RuntimeError as e:
+                # Suppress "Session is closed" error during shutdown
+                if "Session is closed" not in str(e):
+                    raise
+
+        self._start_task = asyncio.create_task(_run_bot(), name="discord-bot-start")
         await self._ready_event.wait()
 
     async def close(self) -> None:
         """Close the bot connection."""
         if self._bot is not None:
             await self._bot.close()
+            # Cancel the start task and wait for it to finish
+            if self._start_task is not None and not self._start_task.done():
+                self._start_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._start_task
 
     async def wait_until_ready(self) -> None:
         """Wait until the bot is ready."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 from typing import TYPE_CHECKING, cast
 
 import anyio
@@ -57,10 +58,32 @@ async def run_main_loop(
     state_store = DiscordStateStore(cfg.runtime.config_path)
     _ = cast(DiscordTransport, cfg.exec_cfg.transport)  # Used for type checking only
 
+    # Initialize voice manager if OpenAI API key is available (needed for TTS)
+    # STT uses local Whisper via pywhispercpp
+    voice_manager = None
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if openai_api_key:
+        try:
+            from openai import AsyncOpenAI
+
+            from .voice import WHISPER_MODEL, VoiceManager
+
+            openai_client = AsyncOpenAI(api_key=openai_api_key)
+            whisper_model = os.environ.get("WHISPER_MODEL", WHISPER_MODEL)
+            voice_manager = VoiceManager(
+                cfg.bot, openai_client, whisper_model=whisper_model
+            )
+            logger.info("voice.enabled", whisper_model=whisper_model)
+        except ImportError as e:
+            logger.warning("voice.disabled", reason=f"missing package: {e}")
+    else:
+        logger.info("voice.disabled", reason="OPENAI_API_KEY not set (needed for TTS)")
+
     logger.info(
         "loop.config",
         has_state_store=state_store is not None,
         guild_id=cfg.guild_id,
+        voice_enabled=voice_manager is not None,
     )
 
     def get_running_task(channel_id: int) -> int | None:
@@ -85,6 +108,7 @@ async def run_main_loop(
         state_store=state_store,
         get_running_task=get_running_task,
         cancel_task=cancel_task,
+        voice_manager=voice_manager,
     )
 
     async def run_job(
@@ -218,10 +242,6 @@ async def run_main_loop(
 
     async def handle_message(message: discord.Message) -> None:
         """Handle an incoming Discord message."""
-        print(
-            f"[DEBUG handle_message] ENTERED - channel={message.channel.id} author={message.author.name}",
-            flush=True,
-        )
         logger.debug(
             "message.raw",
             channel_type=type(message.channel).__name__,
@@ -233,13 +253,8 @@ async def run_main_loop(
             logger.debug(
                 "message.skipped", reason="should_process_message returned False"
             )
-            print(
-                "[DEBUG handle_message] should_process_message returned False, returning",
-                flush=True,
-            )
             return
 
-        print("[DEBUG handle_message] passed should_process_message", flush=True)
         channel_id = message.channel.id
         guild_id = message.guild.id if message.guild else None
         thread_id = None
@@ -251,10 +266,6 @@ async def run_main_loop(
             parent = message.channel.parent
             if parent:
                 channel_id = parent.id
-            print(
-                f"[DEBUG handle_message] in thread: thread_id={thread_id} parent_channel_id={channel_id}",
-                flush=True,
-            )
             logger.debug(
                 "message.in_thread",
                 thread_id=thread_id,
@@ -264,9 +275,6 @@ async def run_main_loop(
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.join()
 
-        print(
-            "[DEBUG handle_message] about to get context from state_store", flush=True
-        )
         # Get context from state
         # For threads, check thread-specific context first (set via @branch prefix)
         # Thread context has a specific branch; channel context uses worktree_base
@@ -279,24 +287,11 @@ async def run_main_loop(
                 ctx = await state_store.get_context(guild_id, thread_id)
                 if isinstance(ctx, DiscordThreadContext):
                     thread_context = ctx
-                print(
-                    f"[DEBUG handle_message] got thread context: {thread_context}",
-                    flush=True,
-                )
 
             # Always get channel context for project info and defaults
-            print(
-                f"[DEBUG handle_message] calling state_store.get_context(guild_id={guild_id}, channel_id={channel_id})",
-                flush=True,
-            )
             ctx = await state_store.get_context(guild_id, channel_id)
             if isinstance(ctx, DiscordChannelContext):
                 channel_context = ctx
-
-        print(
-            f"[DEBUG handle_message] channel_context={channel_context}, thread_context={thread_context}",
-            flush=True,
-        )
 
         # Determine effective context: thread context takes priority, otherwise use channel's worktree_base
         run_context: RunContext | None = None
@@ -318,25 +313,16 @@ async def run_main_loop(
 
         # Extract prompt
         prompt = extract_prompt_from_message(message, cfg.bot.user)
-        print(
-            f"[DEBUG handle_message] extracted prompt: '{prompt[:50] if prompt else ''}'",
-            flush=True,
-        )
 
         # Parse @branch prefix (only for new messages in channels, not in existing threads)
         branch_override: str | None = None
         if thread_id is None:
             branch_override, prompt = parse_branch_prefix(prompt)
             if branch_override:
-                print(
-                    f"[DEBUG handle_message] parsed branch override: {branch_override}",
-                    flush=True,
-                )
                 logger.info("branch.override", branch=branch_override)
 
         # Allow empty prompt if @branch was used (thread will be created for future prompts)
         if not prompt.strip() and not branch_override:
-            print("[DEBUG handle_message] empty prompt, returning", flush=True)
             return
 
         # Apply branch override to context
@@ -427,7 +413,6 @@ async def run_main_loop(
         # within the thread (regardless of which specific message is being replied to)
         resume_token: ResumeToken | None = None
         session_key = thread_id if thread_id else channel_id
-        print(f"[DEBUG handle_message] session_key={session_key}", flush=True)
         logger.debug(
             "session.lookup",
             guild_id=guild_id,
@@ -444,42 +429,9 @@ async def run_main_loop(
             engine_id = cfg.runtime.default_engine or "claude"
 
         if state_store and guild_id:
-            print(
-                f"[DEBUG handle_message] about to call state_store.get_session(guild_id={guild_id}, session_key={session_key}, engine_id={engine_id})",
-                flush=True,
-            )
-            try:
-                token_str = await state_store.get_session(
-                    guild_id, session_key, engine_id
-                )
-                print(
-                    f"[DEBUG handle_message] got token_str: {token_str[:20] if token_str else None}...",
-                    flush=True,
-                )
-            except Exception as e:
-                print(
-                    f"[DEBUG handle_message] EXCEPTION in get_session: {e}", flush=True
-                )
-                import traceback
-
-                traceback.print_exc()
-                raise
+            token_str = await state_store.get_session(guild_id, session_key, engine_id)
             if token_str:
-                try:
-                    resume_token = ResumeToken(engine=engine_id, value=token_str)
-                    print(
-                        "[DEBUG handle_message] created resume_token from token_str",
-                        flush=True,
-                    )
-                except Exception as e:
-                    print(
-                        f"[DEBUG handle_message] EXCEPTION creating ResumeToken: {e}",
-                        flush=True,
-                    )
-                    import traceback
-
-                    traceback.print_exc()
-                    raise
+                resume_token = ResumeToken(engine=engine_id, value=token_str)
                 logger.info(
                     "session.restored",
                     guild_id=guild_id,
@@ -497,10 +449,6 @@ async def run_main_loop(
                     engine_id=engine_id,
                 )
 
-        print(
-            f"[DEBUG handle_message] building reply_ref, is_new_thread={is_new_thread}",
-            flush=True,
-        )
         # For new threads, don't set reply_ref since the original message is in the parent channel
         # and runner_bridge creates its own user_ref that would be incorrect for cross-channel replies
         reply_ref: MessageRef | None = None
@@ -511,10 +459,6 @@ async def run_main_loop(
                 thread_id=thread_id,
             )
 
-        print(
-            f"[DEBUG handle_message] about to call run_job with resume_token={resume_token is not None}",
-            flush=True,
-        )
         logger.info(
             "message.received",
             channel_id=channel_id,
@@ -533,7 +477,6 @@ async def run_main_loop(
         job_channel_id = thread_id if thread_id else channel_id
 
         try:
-            print("[DEBUG handle_message] calling run_job NOW", flush=True)
             await run_job(
                 channel_id=job_channel_id,
                 user_msg_id=message.id,
@@ -575,6 +518,158 @@ async def run_main_loop(
         with contextlib.suppress(discord.HTTPException):
             await thread.join()
             logger.debug("thread.auto_joined", thread_id=thread.id, name=thread.name)
+
+    # Handle voice state updates (users joining/leaving voice channels)
+    if voice_manager is not None:
+
+        @cfg.bot.bot.event
+        async def on_voice_state_update(
+            member: discord.Member,
+            before: discord.VoiceState,
+            after: discord.VoiceState,
+        ) -> None:
+            await voice_manager.handle_voice_state_update(member, before, after)
+
+        # Set up voice message handler
+        async def handle_voice_message(
+            guild_id: int,
+            text_channel_id: int,
+            transcript: str,
+            user_name: str,
+            project: str,
+            branch: str,
+        ) -> str | None:
+            """Handle a transcribed voice message.
+
+            Routes through Claude/takopi for full conversation context.
+            Says "Working on it" immediately, then TTS the final response.
+            """
+            from takopi.context import RunContext
+
+            logger.info(
+                "voice.message",
+                guild_id=guild_id,
+                text_channel_id=text_channel_id,
+                user_name=user_name,
+                transcript_length=len(transcript),
+            )
+
+            # Post the transcribed message to the text channel
+            transport = cast(DiscordTransport, cfg.exec_cfg.transport)
+            await transport.send(
+                channel_id=text_channel_id,
+                message=RenderedMessage(
+                    text=f"🎤 **{user_name}**: {transcript}",
+                    extra={},
+                ),
+            )
+
+            # Say "Working on it" via TTS immediately
+            # Return this first, then process through Claude
+            # The final response will be captured via message listener
+
+            # Set up a listener to capture the final response for TTS
+            final_response: list[str] = []
+            response_event = anyio.Event()
+
+            async def on_message(channel_id: int, text: str, is_final: bool) -> None:
+                if is_final and text:
+                    # Extract just the answer text from the formatted message
+                    # The format is typically: header + answer + footer
+                    # We want just the main content for TTS
+                    final_response.append(text)
+                    response_event.set()
+
+            # Register the listener
+            transport.add_message_listener(text_channel_id, on_message)
+
+            try:
+                # Build run context
+                run_context = RunContext(project=project, branch=branch)
+
+                # Get resume token for the text channel
+                resume_token: ResumeToken | None = None
+                engine_id = cfg.runtime.default_engine or "claude"
+                token_str = await state_store.get_session(
+                    guild_id, text_channel_id, engine_id
+                )
+                if token_str:
+                    resume_token = ResumeToken(engine=engine_id, value=token_str)
+
+                # Use run_job to process the voice message through Claude
+                import time
+
+                voice_msg_id = int(time.time() * 1000)
+
+                # Run the job (this will send progress updates and final response)
+                await run_job(
+                    channel_id=text_channel_id,
+                    user_msg_id=voice_msg_id,
+                    text=transcript,
+                    resume_token=resume_token,
+                    context=run_context,
+                    thread_id=None,
+                    reply_ref=None,
+                    guild_id=guild_id,
+                )
+
+                # Wait briefly for the final response to be captured
+                with anyio.move_on_after(5.0):
+                    await response_event.wait()
+
+                if final_response:
+                    # Extract a TTS-friendly summary from the response
+                    response_text = final_response[0]
+
+                    # Strip markdown formatting for cleaner TTS
+                    import re
+
+                    # Remove the first line (status line like "✅ done · claude · 10s")
+                    lines = response_text.split("\n")
+                    response_text = "\n".join(lines[1:]) if len(lines) > 1 else ""
+                    # Remove code blocks
+                    response_text = re.sub(r"```[\s\S]*?```", "", response_text)
+                    # Remove inline code
+                    response_text = re.sub(r"`[^`]+`", "", response_text)
+                    # Remove bold/italic markers
+                    response_text = re.sub(r"\*+([^*]+)\*+", r"\1", response_text)
+                    # Remove headers
+                    response_text = re.sub(
+                        r"^#+\s+", "", response_text, flags=re.MULTILINE
+                    )
+                    # Remove resume lines (e.g., "↩️ resume: ...")
+                    response_text = re.sub(
+                        r"^↩️.*$", "", response_text, flags=re.MULTILINE
+                    )
+                    # Clean up whitespace
+                    response_text = re.sub(r"\n{3,}", "\n\n", response_text).strip()
+
+                    # Truncate for TTS if too long (keep first ~500 chars)
+                    if len(response_text) > 500:
+                        response_text = response_text[:500] + "..."
+
+                    # Skip if nothing meaningful left after stripping
+                    if not response_text or len(response_text) < 5:
+                        return None
+
+                    logger.info(
+                        "voice.response",
+                        guild_id=guild_id,
+                        response_length=len(response_text),
+                    )
+
+                    return response_text
+
+            except Exception:
+                logger.exception("voice.response_error")
+
+            finally:
+                # Clean up the listener
+                transport.remove_message_listener(text_channel_id)
+
+            return None
+
+        voice_manager.set_message_handler(handle_voice_message)
 
     # Start the bot
     await cfg.bot.start()

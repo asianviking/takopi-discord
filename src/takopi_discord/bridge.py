@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -133,12 +134,29 @@ class DiscordBridgeConfig:
     message_overflow: Literal["trim", "split"] = "trim"
 
 
+# Type alias for message listener callbacks
+MessageListener = (
+    callable  # (channel_id: int, text: str, is_final: bool) -> Awaitable[None]
+)
+
+
 class DiscordTransport:
     """Transport implementation for Discord."""
 
     def __init__(self, bot: DiscordBotClient) -> None:
         self._bot = bot
         self._cancel_handlers: dict[int, callable] = {}  # message_id -> handler
+        self._message_listeners: dict[
+            int, MessageListener
+        ] = {}  # channel_id -> listener
+
+    def add_message_listener(self, channel_id: int, listener: MessageListener) -> None:
+        """Add a listener for messages sent to a channel."""
+        self._message_listeners[channel_id] = listener
+
+    def remove_message_listener(self, channel_id: int) -> None:
+        """Remove a message listener for a channel."""
+        self._message_listeners.pop(channel_id, None)
 
     def register_cancel_handler(self, message_id: int, handler: callable) -> None:
         """Register a cancel handler for a message."""
@@ -238,6 +256,14 @@ class DiscordTransport:
                 reply_to_message_id=reply_to_message_id,
                 thread_id=thread_id,
             )
+
+        # Notify message listeners (for voice TTS)
+        # Check if this is a final message (no cancel button = final response)
+        is_final = not show_cancel
+        listener = self._message_listeners.get(cid)
+        if listener is not None and is_final:
+            with contextlib.suppress(Exception):
+                await listener(cid, message.text, is_final)
 
         return MessageRef(
             channel_id=cid,

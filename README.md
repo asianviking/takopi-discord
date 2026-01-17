@@ -50,7 +50,7 @@ transport = "discord"
 [transports.discord]
 bot_token = "..."                # Required: Discord bot token
 guild_id = 123456789             # Optional: restrict bot to single server
-message_overflow = "trim"        # "trim" (default) or "split" for long messages
+message_overflow = "split"       # "split" (default) or "trim" for long messages
 session_mode = "stateless"       # "stateless" (default) or "chat"
 show_resume_line = true          # Show resume token in messages (default: true)
 upload_dir = "~/uploads"         # Optional: enable /file commands with this root dir

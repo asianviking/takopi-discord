@@ -61,7 +61,7 @@ class DiscordPresenter:
         self,
         *,
         formatter: MarkdownFormatter | None = None,
-        message_overflow: str = "trim",
+        message_overflow: str = "split",
     ) -> None:
         self._formatter = formatter or MarkdownFormatter()
         self._message_overflow = message_overflow
@@ -131,7 +131,7 @@ class DiscordBridgeConfig:
     exec_cfg: ExecBridgeConfig
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
-    message_overflow: Literal["trim", "split"] = "trim"
+    message_overflow: Literal["trim", "split"] = "split"
     upload_dir: str | None = None  # Directory for file transfers
 
 

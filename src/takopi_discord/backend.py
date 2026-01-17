@@ -105,7 +105,7 @@ class DiscordBackend(TransportBackend):
         settings = _get_discord_settings(transport_config)
         token = settings["bot_token"]
         guild_id = settings.get("guild_id")
-        message_overflow = settings.get("message_overflow", "trim")
+        message_overflow = settings.get("message_overflow", "split")
         session_mode = settings.get("session_mode", "stateless")
         show_resume_line = settings.get("show_resume_line", True)
         upload_dir = settings.get("upload_dir")

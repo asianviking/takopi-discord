@@ -242,10 +242,6 @@ async def run_main_loop(
 
     async def handle_message(message: discord.Message) -> None:
         """Handle an incoming Discord message."""
-        print(
-            f"[DEBUG handle_message] ENTERED - channel={message.channel.id} author={message.author.name}",
-            flush=True,
-        )
         logger.debug(
             "message.raw",
             channel_type=type(message.channel).__name__,
@@ -257,13 +253,8 @@ async def run_main_loop(
             logger.debug(
                 "message.skipped", reason="should_process_message returned False"
             )
-            print(
-                "[DEBUG handle_message] should_process_message returned False, returning",
-                flush=True,
-            )
             return
 
-        print("[DEBUG handle_message] passed should_process_message", flush=True)
         channel_id = message.channel.id
         guild_id = message.guild.id if message.guild else None
         thread_id = None
@@ -275,10 +266,6 @@ async def run_main_loop(
             parent = message.channel.parent
             if parent:
                 channel_id = parent.id
-            print(
-                f"[DEBUG handle_message] in thread: thread_id={thread_id} parent_channel_id={channel_id}",
-                flush=True,
-            )
             logger.debug(
                 "message.in_thread",
                 thread_id=thread_id,
@@ -288,9 +275,6 @@ async def run_main_loop(
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.join()
 
-        print(
-            "[DEBUG handle_message] about to get context from state_store", flush=True
-        )
         # Get context from state
         # For threads, check thread-specific context first (set via @branch prefix)
         # Thread context has a specific branch; channel context uses worktree_base
@@ -303,24 +287,11 @@ async def run_main_loop(
                 ctx = await state_store.get_context(guild_id, thread_id)
                 if isinstance(ctx, DiscordThreadContext):
                     thread_context = ctx
-                print(
-                    f"[DEBUG handle_message] got thread context: {thread_context}",
-                    flush=True,
-                )
 
             # Always get channel context for project info and defaults
-            print(
-                f"[DEBUG handle_message] calling state_store.get_context(guild_id={guild_id}, channel_id={channel_id})",
-                flush=True,
-            )
             ctx = await state_store.get_context(guild_id, channel_id)
             if isinstance(ctx, DiscordChannelContext):
                 channel_context = ctx
-
-        print(
-            f"[DEBUG handle_message] channel_context={channel_context}, thread_context={thread_context}",
-            flush=True,
-        )
 
         # Determine effective context: thread context takes priority, otherwise use channel's worktree_base
         run_context: RunContext | None = None
@@ -342,25 +313,16 @@ async def run_main_loop(
 
         # Extract prompt
         prompt = extract_prompt_from_message(message, cfg.bot.user)
-        print(
-            f"[DEBUG handle_message] extracted prompt: '{prompt[:50] if prompt else ''}'",
-            flush=True,
-        )
 
         # Parse @branch prefix (only for new messages in channels, not in existing threads)
         branch_override: str | None = None
         if thread_id is None:
             branch_override, prompt = parse_branch_prefix(prompt)
             if branch_override:
-                print(
-                    f"[DEBUG handle_message] parsed branch override: {branch_override}",
-                    flush=True,
-                )
                 logger.info("branch.override", branch=branch_override)
 
         # Allow empty prompt if @branch was used (thread will be created for future prompts)
         if not prompt.strip() and not branch_override:
-            print("[DEBUG handle_message] empty prompt, returning", flush=True)
             return
 
         # Apply branch override to context
@@ -451,7 +413,6 @@ async def run_main_loop(
         # within the thread (regardless of which specific message is being replied to)
         resume_token: ResumeToken | None = None
         session_key = thread_id if thread_id else channel_id
-        print(f"[DEBUG handle_message] session_key={session_key}", flush=True)
         logger.debug(
             "session.lookup",
             guild_id=guild_id,
@@ -468,42 +429,9 @@ async def run_main_loop(
             engine_id = cfg.runtime.default_engine or "claude"
 
         if state_store and guild_id:
-            print(
-                f"[DEBUG handle_message] about to call state_store.get_session(guild_id={guild_id}, session_key={session_key}, engine_id={engine_id})",
-                flush=True,
-            )
-            try:
-                token_str = await state_store.get_session(
-                    guild_id, session_key, engine_id
-                )
-                print(
-                    f"[DEBUG handle_message] got token_str: {token_str[:20] if token_str else None}...",
-                    flush=True,
-                )
-            except Exception as e:
-                print(
-                    f"[DEBUG handle_message] EXCEPTION in get_session: {e}", flush=True
-                )
-                import traceback
-
-                traceback.print_exc()
-                raise
+            token_str = await state_store.get_session(guild_id, session_key, engine_id)
             if token_str:
-                try:
-                    resume_token = ResumeToken(engine=engine_id, value=token_str)
-                    print(
-                        "[DEBUG handle_message] created resume_token from token_str",
-                        flush=True,
-                    )
-                except Exception as e:
-                    print(
-                        f"[DEBUG handle_message] EXCEPTION creating ResumeToken: {e}",
-                        flush=True,
-                    )
-                    import traceback
-
-                    traceback.print_exc()
-                    raise
+                resume_token = ResumeToken(engine=engine_id, value=token_str)
                 logger.info(
                     "session.restored",
                     guild_id=guild_id,
@@ -521,10 +449,6 @@ async def run_main_loop(
                     engine_id=engine_id,
                 )
 
-        print(
-            f"[DEBUG handle_message] building reply_ref, is_new_thread={is_new_thread}",
-            flush=True,
-        )
         # For new threads, don't set reply_ref since the original message is in the parent channel
         # and runner_bridge creates its own user_ref that would be incorrect for cross-channel replies
         reply_ref: MessageRef | None = None
@@ -535,10 +459,6 @@ async def run_main_loop(
                 thread_id=thread_id,
             )
 
-        print(
-            f"[DEBUG handle_message] about to call run_job with resume_token={resume_token is not None}",
-            flush=True,
-        )
         logger.info(
             "message.received",
             channel_id=channel_id,
@@ -557,7 +477,6 @@ async def run_main_loop(
         job_channel_id = thread_id if thread_id else channel_id
 
         try:
-            print("[DEBUG handle_message] calling run_job NOW", flush=True)
             await run_job(
                 channel_id=job_channel_id,
                 user_msg_id=message.id,
@@ -715,9 +634,13 @@ async def run_main_loop(
                     # Remove bold/italic markers
                     response_text = re.sub(r"\*+([^*]+)\*+", r"\1", response_text)
                     # Remove headers
-                    response_text = re.sub(r"^#+\s+", "", response_text, flags=re.MULTILINE)
+                    response_text = re.sub(
+                        r"^#+\s+", "", response_text, flags=re.MULTILINE
+                    )
                     # Remove resume lines (e.g., "↩️ resume: ...")
-                    response_text = re.sub(r"^↩️.*$", "", response_text, flags=re.MULTILINE)
+                    response_text = re.sub(
+                        r"^↩️.*$", "", response_text, flags=re.MULTILINE
+                    )
                     # Clean up whitespace
                     response_text = re.sub(r"\n{3,}", "\n\n", response_text).strip()
 

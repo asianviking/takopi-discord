@@ -222,7 +222,9 @@ class VoiceManager:
         key = (guild_id, user_id)
         if key not in self._audio_buffers:
             self._audio_buffers[key] = AudioBuffer(user_id=user_id)
-            logger.info("Started receiving audio from user %s in guild %s", user_id, guild_id)
+            logger.info(
+                "Started receiving audio from user %s in guild %s", user_id, guild_id
+            )
         self._audio_buffers[key].add_chunk(data)
 
     async def join_channel(
@@ -331,7 +333,9 @@ class VoiceManager:
 
             for guild_id, user_id, buffer in buffers_to_process:
                 audio = buffer.get_audio_and_clear()
-                logger.info("Processing audio from user %s: %d bytes", user_id, len(audio))
+                logger.info(
+                    "Processing audio from user %s: %d bytes", user_id, len(audio)
+                )
                 asyncio.create_task(self._process_audio(guild_id, user_id, audio))
 
     async def _process_audio(self, guild_id: int, user_id: int, audio: bytes) -> None:
@@ -379,7 +383,11 @@ class VoiceManager:
                 # Skip very short transcripts (likely noise or fragments)
                 words = transcript.strip().split()
                 if len(words) < 1:
-                    logger.debug("Transcript too short (%d words), skipping: %s", len(words), transcript)
+                    logger.debug(
+                        "Transcript too short (%d words), skipping: %s",
+                        len(words),
+                        transcript,
+                    )
                     return
 
                 logger.info("Transcribed from %s: %s", user_name, transcript)
@@ -415,7 +423,9 @@ class VoiceManager:
 
         # Convert 48kHz stereo WAV to 16kHz mono for Whisper
         resampled_wav = self._resample_for_whisper(wav_bytes)
-        logger.info("Resampled audio: %d bytes -> %d bytes", len(wav_bytes), len(resampled_wav))
+        logger.info(
+            "Resampled audio: %d bytes -> %d bytes", len(wav_bytes), len(resampled_wav)
+        )
 
         # Write WAV to temp file (pywhispercpp needs a file path)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -432,6 +442,7 @@ class VoiceManager:
                 logger.info("Segment %d: '%s'", i, seg.text)
             # Combine all segments, filtering out artifact-only segments
             import re
+
             cleaned_segments = []
             for seg in segments_list:
                 seg_text = seg.text.strip()
@@ -459,11 +470,16 @@ class VoiceManager:
         result = subprocess.run(
             [
                 "ffmpeg",
-                "-f", "wav",
-                "-i", "pipe:0",
-                "-ar", str(WHISPER_SAMPLE_RATE),  # 16kHz
-                "-ac", "1",  # Mono
-                "-f", "wav",
+                "-f",
+                "wav",
+                "-i",
+                "pipe:0",
+                "-ar",
+                str(WHISPER_SAMPLE_RATE),  # 16kHz
+                "-ac",
+                "1",  # Mono
+                "-f",
+                "wav",
                 "pipe:1",
             ],
             input=wav_bytes,
@@ -487,7 +503,11 @@ class VoiceManager:
             # Run CPU-bound transcription in thread pool
             text = await asyncio.to_thread(self._transcribe_sync, wav_bytes)
             elapsed_ms = (time.monotonic() - start_time) * 1000
-            logger.info("Transcription complete in %.0fms: %s", elapsed_ms, text[:50] if text else "(empty)")
+            logger.info(
+                "Transcription complete in %.0fms: %s",
+                elapsed_ms,
+                text[:50] if text else "(empty)",
+            )
             return text
         except Exception:
             logger.exception("Error transcribing audio")

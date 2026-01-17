@@ -135,7 +135,9 @@ class DiscordBridgeConfig:
 
 
 # Type alias for message listener callbacks
-MessageListener = callable  # (channel_id: int, text: str, is_final: bool) -> Awaitable[None]
+MessageListener = (
+    callable  # (channel_id: int, text: str, is_final: bool) -> Awaitable[None]
+)
 
 
 class DiscordTransport:
@@ -144,7 +146,9 @@ class DiscordTransport:
     def __init__(self, bot: DiscordBotClient) -> None:
         self._bot = bot
         self._cancel_handlers: dict[int, callable] = {}  # message_id -> handler
-        self._message_listeners: dict[int, MessageListener] = {}  # channel_id -> listener
+        self._message_listeners: dict[
+            int, MessageListener
+        ] = {}  # channel_id -> listener
 
     def add_message_listener(self, channel_id: int, listener: MessageListener) -> None:
         """Add a listener for messages sent to a channel."""

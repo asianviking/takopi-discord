@@ -841,7 +841,9 @@ def register_engine_commands(
             @pycord_bot.slash_command(name=cmd, description=desc)
             async def engine_command(
                 ctx: discord.ApplicationContext,
-                prompt: str = discord.Option(description="The prompt to send to the agent"),
+                prompt: str = discord.Option(
+                    description="The prompt to send to the agent"
+                ),
             ) -> None:
                 await _handle_engine_command(
                     ctx,

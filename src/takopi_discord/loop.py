@@ -13,15 +13,18 @@ from takopi.logging import get_logger
 from takopi.markdown import MarkdownParts
 from takopi.model import ResumeToken
 from takopi.runner_bridge import RunningTasks
+from takopi.runners.run_options import EngineRunOptions, apply_run_options
 from takopi.transport import MessageRef, RenderedMessage
 
 from .bridge import CANCEL_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
 from .handlers import (
     extract_prompt_from_message,
+    is_bot_mentioned,
     parse_branch_prefix,
     register_slash_commands,
     should_process_message,
 )
+from .overrides import resolve_overrides, resolve_trigger_mode
 from .render import prepare_discord
 from .state import DiscordStateStore
 from .types import DiscordChannelContext, DiscordThreadContext
@@ -108,6 +111,8 @@ async def run_main_loop(
         state_store=state_store,
         get_running_task=get_running_task,
         cancel_task=cancel_task,
+        runtime=cfg.runtime,
+        upload_dir=cfg.upload_dir,
         voice_manager=voice_manager,
     )
 
@@ -120,6 +125,7 @@ async def run_main_loop(
         thread_id: int | None = None,
         reply_ref: MessageRef | None = None,
         guild_id: int | None = None,
+        run_options: EngineRunOptions | None = None,
     ) -> None:
         """Run an engine job."""
         from takopi.config import ConfigError
@@ -221,17 +227,18 @@ async def run_main_loop(
                             guild_id=guild_id,
                         )
 
-                await takopi_handle_message(
-                    cfg.exec_cfg,
-                    runner=resolved.runner,
-                    incoming=incoming,
-                    resume_token=resume_token,
-                    context=context,
-                    context_line=context_line,
-                    strip_resume_line=cfg.runtime.is_resume_line,
-                    running_tasks=running_tasks,
-                    on_thread_known=on_thread_known,
-                )
+                with apply_run_options(run_options):
+                    await takopi_handle_message(
+                        cfg.exec_cfg,
+                        runner=resolved.runner,
+                        incoming=incoming,
+                        resume_token=resume_token,
+                        context=context,
+                        context_line=context_line,
+                        strip_resume_line=cfg.runtime.is_resume_line,
+                        running_tasks=running_tasks,
+                        on_thread_known=on_thread_known,
+                    )
                 logger.info("run_job.complete", channel_id=channel_id)
             finally:
                 reset_run_base_dir(run_base_token)
@@ -249,6 +256,12 @@ async def run_main_loop(
             author=message.author.name,
             content_preview=message.content[:50] if message.content else "",
         )
+
+        # Guild-only: ignore DMs
+        if message.guild is None:
+            logger.debug("message.skipped", reason="not in guild (DM)")
+            return
+
         if not should_process_message(message, cfg.bot.user, require_mention=False):
             logger.debug(
                 "message.skipped", reason="should_process_message returned False"
@@ -256,7 +269,7 @@ async def run_main_loop(
             return
 
         channel_id = message.channel.id
-        guild_id = message.guild.id if message.guild else None
+        guild_id = message.guild.id
         thread_id = None
         is_new_thread = False
 
@@ -292,6 +305,30 @@ async def run_main_loop(
             ctx = await state_store.get_context(guild_id, channel_id)
             if isinstance(ctx, DiscordChannelContext):
                 channel_context = ctx
+
+        # Check trigger mode - may skip processing if mentions-only and not mentioned
+        trigger_mode = await resolve_trigger_mode(
+            state_store, guild_id, channel_id, thread_id
+        )
+        if trigger_mode == "mentions":
+            # Check if bot is mentioned or if this is a reply to the bot
+            bot_mentioned = is_bot_mentioned(message, cfg.bot.user)
+            is_reply_to_bot = False
+            if message.reference and message.reference.message_id:
+                # Check if replying to a bot message
+                try:
+                    ref_msg = await message.channel.fetch_message(
+                        message.reference.message_id
+                    )
+                    is_reply_to_bot = ref_msg.author == cfg.bot.user
+                except discord.NotFound:
+                    pass
+            if not bot_mentioned and not is_reply_to_bot:
+                logger.debug(
+                    "message.skipped",
+                    reason="trigger_mode=mentions, bot not mentioned or replied to",
+                )
+                return
 
         # Determine effective context: thread context takes priority, otherwise use channel's worktree_base
         run_context: RunContext | None = None
@@ -476,6 +513,24 @@ async def run_main_loop(
         # For existing threads/channels, thread_id already specifies where to send
         job_channel_id = thread_id if thread_id else channel_id
 
+        # Resolve model and reasoning overrides
+        overrides = await resolve_overrides(
+            state_store, guild_id, channel_id, thread_id, engine_id
+        )
+        run_options: EngineRunOptions | None = None
+        if overrides.model or overrides.reasoning:
+            run_options = EngineRunOptions(
+                model=overrides.model,
+                reasoning=overrides.reasoning,
+            )
+            logger.debug(
+                "run_options.resolved",
+                model=overrides.model,
+                model_source=overrides.source_model,
+                reasoning=overrides.reasoning,
+                reasoning_source=overrides.source_reasoning,
+            )
+
         try:
             await run_job(
                 channel_id=job_channel_id,
@@ -486,6 +541,7 @@ async def run_main_loop(
                 thread_id=thread_id,
                 reply_ref=reply_ref,
                 guild_id=guild_id,
+                run_options=run_options,
             )
         except Exception:
             logger.exception("handle_message.run_job_failed")

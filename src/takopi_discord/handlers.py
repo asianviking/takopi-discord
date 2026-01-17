@@ -1,13 +1,50 @@
 """Slash command and message handlers for Discord."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 import discord
 
+from .overrides import (
+    REASONING_LEVELS,
+    is_valid_reasoning_level,
+    resolve_default_engine,
+    resolve_overrides,
+    resolve_trigger_mode,
+    supports_reasoning,
+)
+
 if TYPE_CHECKING:
+    from takopi.transport_runtime import TransportRuntime
+
     from .client import DiscordBotClient
     from .state import DiscordStateStore
     from .voice import VoiceManager
+
+
+def _is_admin(ctx: discord.ApplicationContext) -> bool:
+    """Check if the user has admin permissions in the guild."""
+    if ctx.guild is None:
+        return False
+    member = ctx.author
+    if isinstance(member, discord.Member):
+        return member.guild_permissions.administrator
+    return False
+
+
+async def _require_admin(ctx: discord.ApplicationContext) -> bool:
+    """Check admin permission and respond with error if not admin.
+
+    Returns True if admin check passed, False if not (and error was sent).
+    """
+    if not _is_admin(ctx):
+        await ctx.respond(
+            "This command requires administrator permissions.",
+            ephemeral=True,
+        )
+        return False
+    return True
 
 
 def register_slash_commands(
@@ -16,6 +53,8 @@ def register_slash_commands(
     state_store: DiscordStateStore,
     get_running_task: callable,
     cancel_task: callable,
+    runtime: TransportRuntime | None = None,
+    upload_dir: str | None = None,
     voice_manager: VoiceManager | None = None,
 ) -> None:
     """Register slash commands with the bot."""
@@ -81,23 +120,20 @@ def register_slash_commands(
     @pycord_bot.slash_command(name="bind", description="Bind this channel to a project")
     async def bind_command(
         ctx: discord.ApplicationContext,
-        project: discord.Option(
-            str, description="The project path (e.g., ~/dev/myproject)"
+        project: str = discord.Option(
+            description="The project path (e.g., ~/dev/myproject)"
         ),
-        worktrees_dir: discord.Option(
-            str,
-            description="Directory for git worktrees (default: .worktrees)",
+        worktrees_dir: str = discord.Option(
             default=".worktrees",
+            description="Directory for git worktrees (default: .worktrees)",
         ),
-        default_engine: discord.Option(
-            str,
-            description="Default engine to use (default: claude)",
+        default_engine: str = discord.Option(
             default="claude",
+            description="Default engine to use (default: claude)",
         ),
-        worktree_base: discord.Option(
-            str,
-            description="Base branch for worktrees and default working branch (default: master)",
+        worktree_base: str = discord.Option(
             default="master",
+            description="Base branch for worktrees and default working branch (default: master)",
         ),
     ) -> None:
         """Bind a channel to a project."""
@@ -168,6 +204,485 @@ def register_slash_commands(
 
         await cancel_task(channel_id)
         await ctx.respond("Cancellation requested.", ephemeral=True)
+
+    @pycord_bot.slash_command(
+        name="new", description="Clear conversation session for this channel/thread"
+    )
+    async def new_command(ctx: discord.ApplicationContext) -> None:
+        """Clear stored resume tokens to start fresh."""
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        channel_id = ctx.channel_id
+        guild_id = ctx.guild.id
+
+        await state_store.clear_sessions(guild_id, channel_id)
+        await ctx.respond("Session cleared. Starting fresh.", ephemeral=True)
+
+    @pycord_bot.slash_command(name="ctx", description="Show or manage context binding")
+    async def ctx_command(
+        ctx: discord.ApplicationContext,
+        action: str | None = discord.Option(
+            default=None,
+            description="Action to perform (show or clear)",
+            choices=["show", "clear"],
+        ),
+    ) -> None:
+        """Show or clear context binding."""
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        guild_id = ctx.guild.id
+        channel_id = ctx.channel_id
+
+        if action == "clear":
+            if not await _require_admin(ctx):
+                return
+            await state_store.set_context(guild_id, channel_id, None)
+            await ctx.respond("Context binding cleared.", ephemeral=True)
+            return
+
+        # Show context
+        from .types import DiscordThreadContext
+
+        context = await state_store.get_context(guild_id, channel_id)
+        if context is None:
+            await ctx.respond(
+                "No context bound to this channel/thread.\n"
+                "Use `/bind <project>` to set up this channel.",
+                ephemeral=True,
+            )
+            return
+
+        if isinstance(context, DiscordThreadContext):
+            msg = (
+                f"**Context**\n"
+                f"- Project: `{context.project}`\n"
+                f"- Branch: `{context.branch}`\n"
+                f"- Engine: `{context.default_engine}`"
+            )
+        else:
+            msg = (
+                f"**Context**\n"
+                f"- Project: `{context.project}`\n"
+                f"- Default branch: `{context.worktree_base}`\n"
+                f"- Engine: `{context.default_engine}`"
+            )
+        await ctx.respond(msg, ephemeral=True)
+
+    @pycord_bot.slash_command(
+        name="agent", description="Show available agents and current defaults"
+    )
+    async def agent_command(ctx: discord.ApplicationContext) -> None:
+        """Show available agents/engines and current configuration."""
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        if runtime is None:
+            await ctx.respond("Runtime not available.", ephemeral=True)
+            return
+
+        guild_id = ctx.guild.id
+        channel_id = ctx.channel_id
+        thread_id = None
+        if isinstance(ctx.channel, discord.Thread):
+            thread_id = ctx.channel_id
+            channel_id = ctx.channel.parent_id or ctx.channel_id
+
+        # Get available engines
+        engines = list(runtime.engine_ids) if runtime.engine_ids else []
+        if not engines:
+            await ctx.respond("No engines configured.", ephemeral=True)
+            return
+
+        # Resolve default engine
+        config_default = runtime.default_engine
+        default_engine, source = await resolve_default_engine(
+            state_store, guild_id, channel_id, thread_id, config_default
+        )
+
+        lines = ["**Available Agents**"]
+        for engine in engines:
+            marker = " (default)" if engine == default_engine else ""
+            lines.append(f"- `{engine}`{marker}")
+
+        if default_engine and source:
+            lines.append(f"\n_Default from: {source}_")
+
+        # Show any overrides
+        overrides = await resolve_overrides(
+            state_store, guild_id, channel_id, thread_id, default_engine or engines[0]
+        )
+        if overrides.model or overrides.reasoning:
+            lines.append("\n**Overrides**")
+            if overrides.model:
+                lines.append(f"- Model: `{overrides.model}` ({overrides.source_model})")
+            if overrides.reasoning:
+                lines.append(
+                    f"- Reasoning: `{overrides.reasoning}` ({overrides.source_reasoning})"
+                )
+
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @pycord_bot.slash_command(
+        name="model", description="Show or set model override for an engine"
+    )
+    async def model_command(
+        ctx: discord.ApplicationContext,
+        engine: str | None = discord.Option(
+            default=None,
+            description="Engine to configure (e.g., claude, codex)",
+        ),
+        model: str | None = discord.Option(
+            default=None,
+            description="Model to use (or 'clear' to remove override)",
+        ),
+    ) -> None:
+        """Show or set model override."""
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        guild_id = ctx.guild.id
+        channel_id = ctx.channel_id
+        thread_id = None
+        target_id = channel_id  # Where to store the override
+
+        if isinstance(ctx.channel, discord.Thread):
+            thread_id = ctx.channel_id
+            target_id = thread_id  # Store on thread
+
+        # Show current overrides
+        if engine is None:
+            model_overrides, _, _, _ = await state_store.get_all_overrides(
+                guild_id, target_id
+            )
+            if not model_overrides:
+                await ctx.respond("No model overrides set.", ephemeral=True)
+                return
+            lines = ["**Model Overrides**"]
+            for eng, mod in model_overrides.items():
+                lines.append(f"- `{eng}`: `{mod}`")
+            await ctx.respond("\n".join(lines), ephemeral=True)
+            return
+
+        # Setting an override requires admin
+        if model is not None:
+            if not await _require_admin(ctx):
+                return
+
+            if model.lower() == "clear":
+                await state_store.set_model_override(guild_id, target_id, engine, None)
+                await ctx.respond(
+                    f"Model override cleared for `{engine}`.", ephemeral=True
+                )
+            else:
+                await state_store.set_model_override(guild_id, target_id, engine, model)
+                await ctx.respond(
+                    f"Model override set for `{engine}`: `{model}`", ephemeral=True
+                )
+            return
+
+        # Show override for specific engine
+        current = await state_store.get_model_override(guild_id, target_id, engine)
+        if current:
+            await ctx.respond(
+                f"Model override for `{engine}`: `{current}`", ephemeral=True
+            )
+        else:
+            await ctx.respond(f"No model override for `{engine}`.", ephemeral=True)
+
+    @pycord_bot.slash_command(
+        name="reasoning", description="Show or set reasoning level for an engine"
+    )
+    async def reasoning_command(
+        ctx: discord.ApplicationContext,
+        engine: str | None = discord.Option(
+            default=None,
+            description="Engine to configure (e.g., codex)",
+        ),
+        level: str | None = discord.Option(
+            default=None,
+            description="Reasoning level (minimal/low/medium/high/xhigh) or 'clear'",
+        ),
+    ) -> None:
+        """Show or set reasoning level override."""
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        guild_id = ctx.guild.id
+        channel_id = ctx.channel_id
+        thread_id = None
+        target_id = channel_id
+
+        if isinstance(ctx.channel, discord.Thread):
+            thread_id = ctx.channel_id
+            target_id = thread_id
+
+        # Show current overrides
+        if engine is None:
+            _, reasoning_overrides, _, _ = await state_store.get_all_overrides(
+                guild_id, target_id
+            )
+            if not reasoning_overrides:
+                await ctx.respond("No reasoning overrides set.", ephemeral=True)
+                return
+            lines = ["**Reasoning Overrides**"]
+            for eng, lvl in reasoning_overrides.items():
+                lines.append(f"- `{eng}`: `{lvl}`")
+            await ctx.respond("\n".join(lines), ephemeral=True)
+            return
+
+        # Setting an override requires admin
+        if level is not None:
+            if not await _require_admin(ctx):
+                return
+
+            if level.lower() == "clear":
+                await state_store.set_reasoning_override(
+                    guild_id, target_id, engine, None
+                )
+                await ctx.respond(
+                    f"Reasoning override cleared for `{engine}`.", ephemeral=True
+                )
+                return
+
+            if not is_valid_reasoning_level(level.lower()):
+                valid = ", ".join(sorted(REASONING_LEVELS))
+                await ctx.respond(
+                    f"Invalid reasoning level. Valid levels: {valid}", ephemeral=True
+                )
+                return
+
+            if not supports_reasoning(engine):
+                await ctx.respond(
+                    f"Engine `{engine}` does not support reasoning overrides.",
+                    ephemeral=True,
+                )
+                return
+
+            await state_store.set_reasoning_override(
+                guild_id, target_id, engine, level.lower()
+            )
+            await ctx.respond(
+                f"Reasoning override set for `{engine}`: `{level.lower()}`",
+                ephemeral=True,
+            )
+            return
+
+        # Show override for specific engine
+        current = await state_store.get_reasoning_override(guild_id, target_id, engine)
+        if current:
+            await ctx.respond(
+                f"Reasoning override for `{engine}`: `{current}`", ephemeral=True
+            )
+        else:
+            await ctx.respond(f"No reasoning override for `{engine}`.", ephemeral=True)
+
+    @pycord_bot.slash_command(
+        name="trigger", description="Show or set trigger mode (all/mentions)"
+    )
+    async def trigger_command(
+        ctx: discord.ApplicationContext,
+        mode: str | None = discord.Option(
+            default=None,
+            description="Trigger mode: all, mentions, or clear",
+            choices=["all", "mentions", "clear"],
+        ),
+    ) -> None:
+        """Show or set trigger mode."""
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+
+        guild_id = ctx.guild.id
+        channel_id = ctx.channel_id
+        thread_id = None
+        target_id = channel_id
+
+        if isinstance(ctx.channel, discord.Thread):
+            thread_id = ctx.channel_id
+            target_id = thread_id
+            channel_id = ctx.channel.parent_id or ctx.channel_id
+
+        # Show current mode
+        if mode is None:
+            current = await resolve_trigger_mode(
+                state_store, guild_id, channel_id, thread_id
+            )
+            stored = await state_store.get_trigger_mode(guild_id, target_id)
+            if stored:
+                await ctx.respond(
+                    f"Trigger mode: `{current}` (set on this {'thread' if thread_id else 'channel'})",
+                    ephemeral=True,
+                )
+            else:
+                await ctx.respond(
+                    f"Trigger mode: `{current}` (inherited/default)", ephemeral=True
+                )
+            return
+
+        # Setting requires admin
+        if not await _require_admin(ctx):
+            return
+
+        if mode == "clear":
+            await state_store.set_trigger_mode(guild_id, target_id, None)
+            await ctx.respond("Trigger mode cleared (using default).", ephemeral=True)
+        else:
+            await state_store.set_trigger_mode(guild_id, target_id, mode)
+            mode_desc = (
+                "respond to all messages"
+                if mode == "all"
+                else "only respond when @mentioned or replied to"
+            )
+            await ctx.respond(
+                f"Trigger mode set to `{mode}` ({mode_desc}).", ephemeral=True
+            )
+
+    # Note: Dynamic engine commands (like /claude, /codex) are not implemented
+    # for Discord because Discord slash commands work differently than Telegram.
+    # Users can:
+    # - Use /agent to see available engines
+    # - Use /model to set model overrides per engine
+    # - Use /bind with default_engine to set the channel's default engine
+
+    # File transfer command (only if upload_dir is configured)
+    if upload_dir is not None:
+        from pathlib import Path
+
+        from .file_transfer import (
+            DEFAULT_DENY_GLOBS,
+            MAX_FILE_SIZE,
+            ZipTooLargeError,
+            deny_reason,
+            format_bytes,
+            normalize_relative_path,
+            resolve_path_within_root,
+            zip_directory,
+        )
+
+        upload_root = Path(upload_dir).expanduser().resolve()
+
+        @pycord_bot.slash_command(name="file", description="Upload or download files")
+        async def file_command(
+            ctx: discord.ApplicationContext,
+            action: str = discord.Option(
+                description="Action: get (download) or put (upload)",
+                choices=["get", "put"],
+            ),
+            path: str = discord.Option(
+                description="File path relative to upload directory",
+            ),
+        ) -> None:
+            """Handle file transfers."""
+            if ctx.guild is None:
+                await ctx.respond(
+                    "This command can only be used in a server.", ephemeral=True
+                )
+                return
+
+            # File operations require admin
+            if not await _require_admin(ctx):
+                return
+
+            if action == "get":
+                # Download file from server
+                rel_path = normalize_relative_path(path)
+                if rel_path is None:
+                    await ctx.respond(
+                        "Invalid path. Must be relative, no `..` or `.git`.",
+                        ephemeral=True,
+                    )
+                    return
+
+                denied = deny_reason(rel_path, DEFAULT_DENY_GLOBS)
+                if denied:
+                    await ctx.respond(
+                        f"Path denied by rule: `{denied}`", ephemeral=True
+                    )
+                    return
+
+                target = resolve_path_within_root(upload_root, rel_path)
+                if target is None:
+                    await ctx.respond("Path escapes upload directory.", ephemeral=True)
+                    return
+
+                if not target.exists():
+                    await ctx.respond(f"File not found: `{rel_path}`", ephemeral=True)
+                    return
+
+                await ctx.defer(ephemeral=True)
+
+                try:
+                    if target.is_dir():
+                        # Zip the directory
+                        try:
+                            zip_data = zip_directory(
+                                upload_root,
+                                rel_path,
+                                DEFAULT_DENY_GLOBS,
+                                max_bytes=MAX_FILE_SIZE,
+                            )
+                        except ZipTooLargeError:
+                            await ctx.followup.send(
+                                f"Directory too large to zip (>{format_bytes(MAX_FILE_SIZE)}).",
+                                ephemeral=True,
+                            )
+                            return
+                        filename = f"{rel_path.name}.zip"
+                        file = discord.File(
+                            fp=__import__("io").BytesIO(zip_data),
+                            filename=filename,
+                        )
+                        await ctx.followup.send(
+                            f"Directory `{rel_path}` ({format_bytes(len(zip_data))})",
+                            file=file,
+                            ephemeral=True,
+                        )
+                    else:
+                        # Send file directly
+                        size = target.stat().st_size
+                        if size > MAX_FILE_SIZE:
+                            await ctx.followup.send(
+                                f"File too large ({format_bytes(size)} > {format_bytes(MAX_FILE_SIZE)}).",
+                                ephemeral=True,
+                            )
+                            return
+                        file = discord.File(fp=str(target), filename=target.name)
+                        await ctx.followup.send(
+                            f"File `{rel_path}` ({format_bytes(size)})",
+                            file=file,
+                            ephemeral=True,
+                        )
+                except OSError as e:
+                    await ctx.followup.send(f"Error reading file: {e}", ephemeral=True)
+
+            elif action == "put":
+                # Upload requires an attachment - show instructions
+                await ctx.respond(
+                    "To upload a file:\n"
+                    "1. Send a message with the file attached\n"
+                    "2. Reply to that message with `/file put <path>`\n\n"
+                    "Or use the message command (right-click message > Apps > Save File)",
+                    ephemeral=True,
+                )
 
     # Voice commands (only register if voice_manager is provided)
     if voice_manager is not None:

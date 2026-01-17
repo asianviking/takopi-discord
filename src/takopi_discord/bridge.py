@@ -132,6 +132,7 @@ class DiscordBridgeConfig:
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
     message_overflow: Literal["trim", "split"] = "trim"
+    upload_dir: str | None = None  # Directory for file transfers
 
 
 # Type alias for message listener callbacks

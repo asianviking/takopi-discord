@@ -11,7 +11,7 @@ import msgspec
 
 from .types import DiscordChannelContext, DiscordThreadContext
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 
 
 class DiscordChannelStateData(msgspec.Struct):
@@ -21,6 +21,11 @@ class DiscordChannelStateData(msgspec.Struct):
     # For threads: {"project", "branch", "worktrees_dir", "default_engine"}
     context: dict[str, str] | None = None
     sessions: dict[str, str] | None = None  # engine_id -> resume_token
+    # New fields for overrides
+    model_overrides: dict[str, str] | None = None  # engine_id -> model
+    reasoning_overrides: dict[str, str] | None = None  # engine_id -> level
+    trigger_mode: str | None = None  # "all" | "mentions"
+    default_engine: str | None = None  # default engine for this channel/thread
 
 
 class DiscordState(msgspec.Struct):
@@ -77,8 +82,11 @@ class DiscordStateStore:
         except Exception:  # noqa: BLE001
             self._state = DiscordState()
             return
-        if payload.version != STATE_VERSION:
-            self._state = DiscordState()
+        # Handle migration from version 1 to 2 (new fields have defaults)
+        if payload.version < STATE_VERSION:
+            payload = DiscordState(version=STATE_VERSION, channels=payload.channels)
+            self._state = payload
+            self._save()
             return
         self._state = payload
 
@@ -203,3 +211,180 @@ class DiscordStateStore:
             key = self._channel_key(guild_id, channel_id)
             self._state.channels.pop(key, None)
             self._save()
+
+    async def clear_sessions(self, guild_id: int | None, channel_id: int) -> None:
+        """Clear all session tokens for a channel/thread."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is not None:
+                channel_data.sessions = None
+                self._save()
+
+    # Model override methods
+    async def get_model_override(
+        self, guild_id: int | None, channel_id: int, engine_id: str
+    ) -> str | None:
+        """Get model override for an engine."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is None or channel_data.model_overrides is None:
+                return None
+            return channel_data.model_overrides.get(engine_id)
+
+    async def set_model_override(
+        self,
+        guild_id: int | None,
+        channel_id: int,
+        engine_id: str,
+        model: str | None,
+    ) -> None:
+        """Set or clear model override for an engine."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            if key not in self._state.channels:
+                self._state.channels[key] = DiscordChannelStateData()
+            if self._state.channels[key].model_overrides is None:
+                self._state.channels[key].model_overrides = {}
+            if model is None:
+                self._state.channels[key].model_overrides.pop(engine_id, None)
+                if not self._state.channels[key].model_overrides:
+                    self._state.channels[key].model_overrides = None
+            else:
+                self._state.channels[key].model_overrides[engine_id] = model
+            self._save()
+
+    async def clear_model_overrides(
+        self, guild_id: int | None, channel_id: int
+    ) -> None:
+        """Clear all model overrides for a channel/thread."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is not None:
+                channel_data.model_overrides = None
+                self._save()
+
+    # Reasoning override methods
+    async def get_reasoning_override(
+        self, guild_id: int | None, channel_id: int, engine_id: str
+    ) -> str | None:
+        """Get reasoning level override for an engine."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is None or channel_data.reasoning_overrides is None:
+                return None
+            return channel_data.reasoning_overrides.get(engine_id)
+
+    async def set_reasoning_override(
+        self,
+        guild_id: int | None,
+        channel_id: int,
+        engine_id: str,
+        level: str | None,
+    ) -> None:
+        """Set or clear reasoning level override for an engine."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            if key not in self._state.channels:
+                self._state.channels[key] = DiscordChannelStateData()
+            if self._state.channels[key].reasoning_overrides is None:
+                self._state.channels[key].reasoning_overrides = {}
+            if level is None:
+                self._state.channels[key].reasoning_overrides.pop(engine_id, None)
+                if not self._state.channels[key].reasoning_overrides:
+                    self._state.channels[key].reasoning_overrides = None
+            else:
+                self._state.channels[key].reasoning_overrides[engine_id] = level
+            self._save()
+
+    async def clear_reasoning_overrides(
+        self, guild_id: int | None, channel_id: int
+    ) -> None:
+        """Clear all reasoning overrides for a channel/thread."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is not None:
+                channel_data.reasoning_overrides = None
+                self._save()
+
+    # Trigger mode methods
+    async def get_trigger_mode(
+        self, guild_id: int | None, channel_id: int
+    ) -> str | None:
+        """Get trigger mode for a channel/thread."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is None:
+                return None
+            return channel_data.trigger_mode
+
+    async def set_trigger_mode(
+        self, guild_id: int | None, channel_id: int, mode: str | None
+    ) -> None:
+        """Set or clear trigger mode for a channel/thread."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            if key not in self._state.channels:
+                self._state.channels[key] = DiscordChannelStateData()
+            self._state.channels[key].trigger_mode = mode
+            self._save()
+
+    # Default engine methods
+    async def get_default_engine(
+        self, guild_id: int | None, channel_id: int
+    ) -> str | None:
+        """Get default engine for a channel/thread."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is None:
+                return None
+            return channel_data.default_engine
+
+    async def set_default_engine(
+        self, guild_id: int | None, channel_id: int, engine: str | None
+    ) -> None:
+        """Set or clear default engine for a channel/thread."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            if key not in self._state.channels:
+                self._state.channels[key] = DiscordChannelStateData()
+            self._state.channels[key].default_engine = engine
+            self._save()
+
+    # Bulk getters for displaying all overrides
+    async def get_all_overrides(
+        self, guild_id: int | None, channel_id: int
+    ) -> tuple[dict[str, str] | None, dict[str, str] | None, str | None, str | None]:
+        """Get all overrides for a channel/thread.
+
+        Returns: (model_overrides, reasoning_overrides, trigger_mode, default_engine)
+        """
+        async with self._lock:
+            self._reload_if_needed()
+            key = self._channel_key(guild_id, channel_id)
+            channel_data = self._state.channels.get(key)
+            if channel_data is None:
+                return None, None, None, None
+            return (
+                channel_data.model_overrides,
+                channel_data.reasoning_overrides,
+                channel_data.trigger_mode,
+                channel_data.default_engine,
+            )

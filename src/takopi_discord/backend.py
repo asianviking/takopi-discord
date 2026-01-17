@@ -108,6 +108,7 @@ class DiscordBackend(TransportBackend):
         message_overflow = settings.get("message_overflow", "trim")
         session_mode = settings.get("session_mode", "stateless")
         show_resume_line = settings.get("show_resume_line", True)
+        upload_dir = settings.get("upload_dir")
 
         startup_msg = _build_startup_message(
             runtime,
@@ -131,6 +132,7 @@ class DiscordBackend(TransportBackend):
             session_mode=session_mode,
             show_resume_line=show_resume_line,
             message_overflow=message_overflow,
+            upload_dir=upload_dir,
         )
 
         async def run_loop() -> None:

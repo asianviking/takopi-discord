@@ -293,6 +293,7 @@ class DiscordTransport:
             message_id=message_id,
             content=message.text,
             view=view,
+            wait=wait,
         )
         if edited is None:
             return ref if not wait else None

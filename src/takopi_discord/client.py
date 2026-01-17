@@ -4,13 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
+import time
+from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import anyio
 import discord
 
+from takopi.logging import get_logger
+
+from .outbox import (
+    DELETE_PRIORITY,
+    EDIT_PRIORITY,
+    SEND_PRIORITY,
+    DiscordOutbox,
+    OutboxOp,
+    RetryAfter,
+)
+
+logger = get_logger(__name__)
+
+# Default rate limit: ~1 message per second per channel (Discord: 5/5s)
+DEFAULT_CHANNEL_RPS = 1.0
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Coroutine
 
     MessageHandler = Callable[[discord.Message], Coroutine[Any, Any, None]]
     InteractionHandler = Callable[[discord.Interaction], Coroutine[Any, Any, None]]
@@ -28,7 +48,15 @@ class SentMessage:
 class DiscordBotClient:
     """Wrapper around Pycord Bot for takopi integration."""
 
-    def __init__(self, token: str, *, guild_id: int | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        guild_id: int | None = None,
+        channel_rps: float = DEFAULT_CHANNEL_RPS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+    ) -> None:
         self._token = token
         self._guild_id = guild_id
         self._message_handler: MessageHandler | None = None
@@ -37,6 +65,18 @@ class DiscordBotClient:
         self._bot: discord.Bot | None = None
         self._ready_event: asyncio.Event | None = None
         self._start_task: asyncio.Task[None] | None = None
+        # Rate limiting
+        self._clock = clock
+        self._sleep = sleep
+        self._channel_interval = 0.0 if channel_rps <= 0 else 1.0 / channel_rps
+        self._outbox = DiscordOutbox(
+            interval_for_channel=self.interval_for_channel,
+            clock=clock,
+            sleep=sleep,
+            on_error=self._log_request_error,
+            on_outbox_error=self._log_outbox_failure,
+        )
+        self._seq = itertools.count()
 
     def _ensure_bot(self) -> discord.Bot:
         """Create the bot if not already created. Must be called from async context."""
@@ -92,6 +132,78 @@ class DiscordBotClient:
         """Set the interaction handler for non-command interactions."""
         self._interaction_handler = handler
 
+    def interval_for_channel(self, channel_id: int | None) -> float:
+        """Get the rate limit interval for a channel."""
+        return self._channel_interval
+
+    def _log_request_error(self, request: OutboxOp, exc: Exception) -> None:
+        """Log an error from an individual request."""
+        logger.error(
+            "discord.outbox.request_failed",
+            method=request.label,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+
+    def _log_outbox_failure(self, exc: Exception) -> None:
+        """Log a fatal outbox error."""
+        logger.error(
+            "discord.outbox.failed",
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+
+    def _unique_key(self, prefix: str) -> tuple[str, int]:
+        """Generate a unique key for non-coalescing operations."""
+        return (prefix, next(self._seq))
+
+    async def _enqueue_op(
+        self,
+        *,
+        key: Hashable,
+        label: str,
+        execute: Callable[[], Awaitable[Any]],
+        priority: int,
+        channel_id: int | None,
+        wait: bool = True,
+    ) -> Any:
+        """Enqueue an operation in the outbox."""
+        request = OutboxOp(
+            execute=execute,
+            priority=priority,
+            queued_at=self._clock(),
+            channel_id=channel_id,
+            label=label,
+        )
+        return await self._outbox.enqueue(key=key, op=request, wait=wait)
+
+    async def drop_pending_edits(self, *, channel_id: int, message_id: int) -> None:
+        """Drop pending edit operations for a message."""
+        await self._outbox.drop_pending(key=("edit", channel_id, message_id))
+
+    def _extract_retry_after(self, exc: discord.HTTPException) -> float:
+        """Extract retry_after value from a Discord HTTPException."""
+        # Try to get from response headers
+        if hasattr(exc, "response") and exc.response is not None:
+            retry_after = exc.response.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    return float(retry_after)
+                except ValueError:
+                    pass
+        # Try to get from JSON body (if available in exc.text)
+        if hasattr(exc, "text") and exc.text:
+            import json
+
+            try:
+                data = json.loads(exc.text)
+                if isinstance(data, dict) and "retry_after" in data:
+                    return float(data["retry_after"])
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+        # Default to 1 second if we can't extract the value
+        return 1.0
+
     async def start(self) -> None:
         """Start the bot and wait until ready."""
         bot = self._ensure_bot()
@@ -112,6 +224,7 @@ class DiscordBotClient:
 
     async def close(self) -> None:
         """Close the bot connection."""
+        await self._outbox.close()
         if self._bot is not None:
             await self._bot.close()
             # Cancel the start task and wait for it to finish
@@ -137,7 +250,39 @@ class DiscordBotClient:
         embed: discord.Embed | None = None,
         suppress_embeds: bool = True,
     ) -> SentMessage | None:
-        """Send a message to a channel."""
+        """Send a message to a channel (queued with rate limiting)."""
+
+        async def execute() -> SentMessage | None:
+            return await self._send_message_impl(
+                channel_id=channel_id,
+                content=content,
+                reply_to_message_id=reply_to_message_id,
+                thread_id=thread_id,
+                view=view,
+                embed=embed,
+                suppress_embeds=suppress_embeds,
+            )
+
+        return await self._enqueue_op(
+            key=self._unique_key("send"),
+            label="send_message",
+            execute=execute,
+            priority=SEND_PRIORITY,
+            channel_id=thread_id or channel_id,
+        )
+
+    async def _send_message_impl(
+        self,
+        *,
+        channel_id: int,
+        content: str,
+        reply_to_message_id: int | None = None,
+        thread_id: int | None = None,
+        view: discord.ui.View | None = None,
+        embed: discord.Embed | None = None,
+        suppress_embeds: bool = True,
+    ) -> SentMessage | None:
+        """Internal implementation of send_message."""
         channel = self._bot.get_channel(thread_id or channel_id)
         if channel is None:
             try:
@@ -172,7 +317,11 @@ class DiscordBotClient:
                 channel_id=message.channel.id,
                 thread_id=thread_id,
             )
-        except discord.HTTPException:
+        except discord.HTTPException as exc:
+            # Check for rate limit
+            if exc.status == 429:
+                retry_after = self._extract_retry_after(exc)
+                raise RetryAfter(retry_after, "Discord rate limit") from exc
             # If send failed and we had a reference, retry without it
             # This handles cases like new threads where the reply message
             # might not be in the thread
@@ -185,7 +334,10 @@ class DiscordBotClient:
                         channel_id=message.channel.id,
                         thread_id=thread_id,
                     )
-                except discord.HTTPException:
+                except discord.HTTPException as retry_exc:
+                    if retry_exc.status == 429:
+                        retry_after = self._extract_retry_after(retry_exc)
+                        raise RetryAfter(retry_after, "Discord rate limit") from retry_exc
                     return None
             return None
 
@@ -198,8 +350,40 @@ class DiscordBotClient:
         view: discord.ui.View | None = None,
         embed: discord.Embed | None = None,
         suppress_embeds: bool = True,
+        wait: bool = True,
     ) -> SentMessage | None:
-        """Edit an existing message."""
+        """Edit an existing message (queued with rate limiting and coalescing)."""
+
+        async def execute() -> SentMessage | None:
+            return await self._edit_message_impl(
+                channel_id=channel_id,
+                message_id=message_id,
+                content=content,
+                view=view,
+                embed=embed,
+                suppress_embeds=suppress_embeds,
+            )
+
+        return await self._enqueue_op(
+            key=("edit", channel_id, message_id),
+            label="edit_message",
+            execute=execute,
+            priority=EDIT_PRIORITY,
+            channel_id=channel_id,
+            wait=wait,
+        )
+
+    async def _edit_message_impl(
+        self,
+        *,
+        channel_id: int,
+        message_id: int,
+        content: str,
+        view: discord.ui.View | None = None,
+        embed: discord.Embed | None = None,
+        suppress_embeds: bool = True,
+    ) -> SentMessage | None:
+        """Internal implementation of edit_message."""
         channel = self._bot.get_channel(channel_id)
         if channel is None:
             try:
@@ -223,7 +407,10 @@ class DiscordBotClient:
                 message_id=edited.id,
                 channel_id=edited.channel.id,
             )
-        except discord.HTTPException:
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                retry_after = self._extract_retry_after(exc)
+                raise RetryAfter(retry_after, "Discord rate limit") from exc
             return None
 
     async def delete_message(
@@ -232,7 +419,32 @@ class DiscordBotClient:
         channel_id: int,
         message_id: int,
     ) -> bool:
-        """Delete a message."""
+        """Delete a message (queued with rate limiting)."""
+        # Drop any pending edits for this message before deleting
+        await self.drop_pending_edits(channel_id=channel_id, message_id=message_id)
+
+        async def execute() -> bool:
+            return await self._delete_message_impl(
+                channel_id=channel_id,
+                message_id=message_id,
+            )
+
+        result = await self._enqueue_op(
+            key=("delete", channel_id, message_id),
+            label="delete_message",
+            execute=execute,
+            priority=DELETE_PRIORITY,
+            channel_id=channel_id,
+        )
+        return bool(result)
+
+    async def _delete_message_impl(
+        self,
+        *,
+        channel_id: int,
+        message_id: int,
+    ) -> bool:
+        """Internal implementation of delete_message."""
         channel = self._bot.get_channel(channel_id)
         if channel is None:
             try:
@@ -247,7 +459,10 @@ class DiscordBotClient:
             message = await channel.fetch_message(message_id)
             await message.delete()
             return True
-        except discord.HTTPException:
+        except discord.HTTPException as exc:
+            if exc.status == 429:
+                retry_after = self._extract_retry_after(exc)
+                raise RetryAfter(retry_after, "Discord rate limit") from exc
             return False
 
     async def create_thread(

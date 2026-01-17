@@ -17,6 +17,7 @@ from takopi.runners.run_options import EngineRunOptions, apply_run_options
 from takopi.transport import MessageRef, RenderedMessage
 
 from .bridge import CANCEL_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
+from .commands import discover_command_ids, register_plugin_commands
 from .handlers import (
     extract_prompt_from_message,
     is_bot_mentioned,
@@ -105,7 +106,7 @@ async def run_main_loop(
                 task.cancel_requested.set()
                 break
 
-    # Register slash commands
+    # Register built-in slash commands (reserved commands)
     register_slash_commands(
         cfg.bot,
         state_store=state_store,
@@ -115,6 +116,25 @@ async def run_main_loop(
         upload_dir=cfg.upload_dir,
         voice_manager=voice_manager,
     )
+
+    # Discover and register plugin commands
+    command_ids = discover_command_ids(cfg.runtime.allowlist)
+    if command_ids:
+        logger.info(
+            "plugins.discovered",
+            count=len(command_ids),
+            ids=sorted(command_ids),
+        )
+        register_plugin_commands(
+            cfg.bot,
+            cfg,
+            command_ids=command_ids,
+            running_tasks=running_tasks,
+            state_store=state_store,
+            default_engine_override=default_engine_override,
+        )
+    else:
+        logger.info("plugins.none_found")
 
     async def run_job(
         channel_id: int,

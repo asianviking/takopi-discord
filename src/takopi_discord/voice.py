@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import logging
 import struct
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Coroutine
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import discord
+from pywhispercpp.model import Model as WhisperModel
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -30,6 +31,10 @@ SAMPLE_RATE = 48000  # Discord uses 48kHz
 CHANNELS = 2  # Stereo
 SAMPLE_WIDTH = 2  # 16-bit PCM
 SILENCE_AMPLITUDE_THRESHOLD = 500  # RMS amplitude below this is considered silence
+
+# Whisper STT constants
+WHISPER_MODEL = "base"  # Options: tiny, base, small, medium, large-v3
+WHISPER_SAMPLE_RATE = 16000  # Whisper expects 16kHz mono audio
 
 
 @dataclass
@@ -149,11 +154,14 @@ class VoiceManager:
         *,
         tts_voice: str = "nova",
         tts_model: str = "tts-1",
+        whisper_model: str = WHISPER_MODEL,
     ) -> None:
         self._bot = bot
         self._openai = openai_client
         self._tts_voice = tts_voice
         self._tts_model = tts_model
+        self._whisper_model_name = whisper_model
+        self._whisper_model: WhisperModel | None = None  # Lazy init
         self._sessions: dict[int, VoiceSession] = {}  # guild_id -> session
         self._audio_buffers: dict[
             tuple[int, int], AudioBuffer
@@ -164,6 +172,14 @@ class VoiceManager:
         self._last_process_time: dict[int, float] = {}  # guild_id -> timestamp
         self._process_cooldown_s = 1.0  # Minimum seconds between processing
         self._is_responding: dict[int, bool] = {}  # guild_id -> is currently responding
+
+    def _get_whisper_model(self) -> WhisperModel:
+        """Lazy-load Whisper model."""
+        if self._whisper_model is None:
+            logger.info("Loading Whisper model: %s", self._whisper_model_name)
+            self._whisper_model = WhisperModel(self._whisper_model_name)
+            logger.info("Whisper model loaded")
+        return self._whisper_model
 
     def set_message_handler(self, handler: VoiceMessageHandler) -> None:
         """Set the handler for processing transcribed voice messages."""
@@ -348,7 +364,7 @@ class VoiceManager:
 
                 # Skip very short transcripts (likely noise or fragments)
                 words = transcript.strip().split()
-                if len(words) < 3:
+                if len(words) < 1:
                     logger.debug("Transcript too short (%d words), skipping: %s", len(words), transcript)
                     return
 
@@ -376,22 +392,86 @@ class VoiceManager:
                 # Done responding - start listening again
                 self._is_responding[guild_id] = False
 
+    def _transcribe_sync(self, wav_bytes: bytes) -> str:
+        """Synchronous transcription using local Whisper (runs in thread pool)."""
+        model = self._get_whisper_model()
+
+        # Convert 48kHz stereo WAV to 16kHz mono for Whisper
+        resampled_wav = self._resample_for_whisper(wav_bytes)
+        logger.info("Resampled audio: %d bytes -> %d bytes", len(wav_bytes), len(resampled_wav))
+
+        # Write WAV to temp file (pywhispercpp needs a file path)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(resampled_wav)
+            temp_path = Path(f.name)
+
+        try:
+            # Transcribe
+            segments = model.transcribe(str(temp_path))
+            # Convert to list to check contents
+            segments_list = list(segments)
+            logger.info("Got %d segments from Whisper", len(segments_list))
+            for i, seg in enumerate(segments_list):
+                logger.info("Segment %d: '%s'", i, seg.text)
+            # Combine all segments, filtering out artifact-only segments
+            import re
+            cleaned_segments = []
+            for seg in segments_list:
+                seg_text = seg.text.strip()
+                # Skip segments that are only artifacts
+                if re.fullmatch(r"[\[\(].*?[\]\)]", seg_text):
+                    continue
+                cleaned_segments.append(seg_text)
+
+            text = " ".join(cleaned_segments)
+            # Remove remaining Whisper artifacts like [Silence], [Music], [BLANK_AUDIO], etc.
+            text = re.sub(r"\[.*?\]", "", text)  # Remove [bracketed] text
+            text = re.sub(r"\(.*?\)", "", text)  # Remove (parenthesized) text
+            text = re.sub(r"\s+", " ", text)  # Normalize whitespace
+            text = text.strip()
+            logger.info("Combined text: '%s'", text)
+            return text
+        finally:
+            # Clean up
+            with contextlib.suppress(OSError):
+                temp_path.unlink()
+
+    def _resample_for_whisper(self, wav_bytes: bytes) -> bytes:
+        """Resample WAV from 48kHz stereo to 16kHz mono for Whisper."""
+        # Use FFmpeg to resample
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-f", "wav",
+                "-i", "pipe:0",
+                "-ar", str(WHISPER_SAMPLE_RATE),  # 16kHz
+                "-ac", "1",  # Mono
+                "-f", "wav",
+                "pipe:1",
+            ],
+            input=wav_bytes,
+            capture_output=True,
+        )
+
+        if result.returncode != 0:
+            logger.error("FFmpeg resample failed: %s", result.stderr.decode())
+            return wav_bytes  # Return original as fallback
+
+        return result.stdout
+
     async def transcribe(self, audio: bytes) -> str:
-        """Transcribe audio bytes to text using OpenAI Whisper."""
+        """Transcribe audio bytes to text using local Whisper."""
         # Convert raw PCM to WAV format for Whisper
         wav_bytes = self._pcm_to_wav(audio)
 
-        # Create a file-like object
-        audio_file = io.BytesIO(wav_bytes)
-        audio_file.name = "audio.wav"
-
         try:
-            response = await self._openai.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="en",
-            )
-            return response.text
+            logger.info("Transcribing audio with local Whisper...")
+            start_time = time.monotonic()
+            # Run CPU-bound transcription in thread pool
+            text = await asyncio.to_thread(self._transcribe_sync, wav_bytes)
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+            logger.info("Transcription complete in %.0fms: %s", elapsed_ms, text[:50] if text else "(empty)")
+            return text
         except Exception:
             logger.exception("Error transcribing audio")
             return ""

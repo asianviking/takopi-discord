@@ -58,22 +58,26 @@ async def run_main_loop(
     state_store = DiscordStateStore(cfg.runtime.config_path)
     _ = cast(DiscordTransport, cfg.exec_cfg.transport)  # Used for type checking only
 
-    # Initialize voice manager if OpenAI API key is available
+    # Initialize voice manager if OpenAI API key is available (needed for TTS)
+    # STT uses local Whisper via pywhispercpp
     voice_manager = None
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if openai_api_key:
         try:
             from openai import AsyncOpenAI
 
-            from .voice import VoiceManager
+            from .voice import WHISPER_MODEL, VoiceManager
 
             openai_client = AsyncOpenAI(api_key=openai_api_key)
-            voice_manager = VoiceManager(cfg.bot, openai_client)
-            logger.info("voice.enabled", has_openai_key=True)
-        except ImportError:
-            logger.warning("voice.disabled", reason="openai package not installed")
+            whisper_model = os.environ.get("WHISPER_MODEL", WHISPER_MODEL)
+            voice_manager = VoiceManager(
+                cfg.bot, openai_client, whisper_model=whisper_model
+            )
+            logger.info("voice.enabled", whisper_model=whisper_model)
+        except ImportError as e:
+            logger.warning("voice.disabled", reason=f"missing package: {e}")
     else:
-        logger.info("voice.disabled", reason="OPENAI_API_KEY not set")
+        logger.info("voice.disabled", reason="OPENAI_API_KEY not set (needed for TTS)")
 
     logger.info(
         "loop.config",

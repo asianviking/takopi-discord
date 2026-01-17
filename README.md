@@ -77,6 +77,17 @@ State is automatically saved to `~/.takopi/discord_state.json`.
 - `/cancel` - Cancel running task
 - `/new` - Clear conversation session (start fresh)
 
+### Engine Commands
+
+Dynamic slash commands are registered for each configured engine:
+
+- `/claude [prompt]` - Send a message to Claude
+- `/codex [prompt]` - Send a message to Codex
+- `/gemini [prompt]` - Send a message to Gemini
+- etc.
+
+These commands allow you to target a specific engine regardless of the channel's default.
+
 ### Agent & Model Commands
 
 - `/agent` - Show available agents and current defaults
@@ -95,7 +106,11 @@ Requires `upload_dir` to be configured. Files in `.git`, `.env`, and credentials
 
 - `/voice` or `/vc` - Create a voice channel for the current thread/channel
 
-The voice channel is bound to the project context and auto-deletes when empty.
+The voice channel is bound to the project context and auto-deletes when empty. Uses local Whisper for speech-to-text transcription.
+
+### Plugins
+
+Custom command plugins can extend the bot's functionality. Plugin commands are automatically registered as slash commands when loaded by takopi.
 
 ## Message Features
 
@@ -116,6 +131,7 @@ This creates a new thread bound to the specified branch. Without a prefix, threa
 - Each thread maintains its own session with resume tokens
 - Multiple sessions can run simultaneously across threads
 - Cancel button appears on progress messages for task cancellation
+- Rate limiting prevents Discord API throttling during high activity
 
 ### Trigger Modes
 

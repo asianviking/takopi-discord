@@ -49,7 +49,9 @@ async def resolve_overrides(
 
     # Check thread overrides first (if in a thread)
     if thread_id is not None:
-        thread_model = await state_store.get_model_override(guild_id, thread_id, engine_id)
+        thread_model = await state_store.get_model_override(
+            guild_id, thread_id, engine_id
+        )
         if thread_model is not None:
             model = thread_model
             source_model = "thread"
@@ -63,7 +65,9 @@ async def resolve_overrides(
 
     # Fall back to channel overrides
     if model is None:
-        channel_model = await state_store.get_model_override(guild_id, channel_id, engine_id)
+        channel_model = await state_store.get_model_override(
+            guild_id, channel_id, engine_id
+        )
         if channel_model is not None:
             model = channel_model
             source_model = "channel"

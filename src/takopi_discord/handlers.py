@@ -222,9 +222,7 @@ def register_slash_commands(
         await state_store.clear_sessions(guild_id, channel_id)
         await ctx.respond("Session cleared. Starting fresh.", ephemeral=True)
 
-    @pycord_bot.slash_command(
-        name="ctx", description="Show or manage context binding"
-    )
+    @pycord_bot.slash_command(name="ctx", description="Show or manage context binding")
     async def ctx_command(
         ctx: discord.ApplicationContext,
         action: str | None = discord.Option(
@@ -582,9 +580,7 @@ def register_slash_commands(
 
         upload_root = Path(upload_dir).expanduser().resolve()
 
-        @pycord_bot.slash_command(
-            name="file", description="Upload or download files"
-        )
+        @pycord_bot.slash_command(name="file", description="Upload or download files")
         async def file_command(
             ctx: discord.ApplicationContext,
             action: str = discord.Option(
@@ -625,15 +621,11 @@ def register_slash_commands(
 
                 target = resolve_path_within_root(upload_root, rel_path)
                 if target is None:
-                    await ctx.respond(
-                        "Path escapes upload directory.", ephemeral=True
-                    )
+                    await ctx.respond("Path escapes upload directory.", ephemeral=True)
                     return
 
                 if not target.exists():
-                    await ctx.respond(
-                        f"File not found: `{rel_path}`", ephemeral=True
-                    )
+                    await ctx.respond(f"File not found: `{rel_path}`", ephemeral=True)
                     return
 
                 await ctx.defer(ephemeral=True)
@@ -680,9 +672,7 @@ def register_slash_commands(
                             ephemeral=True,
                         )
                 except OSError as e:
-                    await ctx.followup.send(
-                        f"Error reading file: {e}", ephemeral=True
-                    )
+                    await ctx.followup.send(f"Error reading file: {e}", ephemeral=True)
 
             elif action == "put":
                 # Upload requires an attachment - show instructions

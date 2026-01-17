@@ -370,7 +370,10 @@ class VoiceManager:
 
                 logger.info("Transcribed from %s: %s", user_name, transcript)
 
-                # Call the message handler (skip acknowledgment to reduce latency)
+                # Say acknowledgment so user knows we heard them
+                await self.speak(guild_id, "Hmm, let me think about that.")
+
+                # Call the message handler
                 if self._message_handler is not None:
                     response = await self._message_handler(
                         guild_id,

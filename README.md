@@ -8,23 +8,24 @@ Maps Discord's structure to takopi's project/branch/session model:
 
 | Discord | Takopi | Purpose |
 |---------|--------|---------|
-| Category | Project | Repository context |
-| Channel | Branch | Feature branch / worktree |
-| Thread | Session | Conversation with agent |
+| Category | (organization) | Visual grouping |
+| Channel | Project | Repository context (bound via `/bind`) |
+| Thread | Branch / Session | Feature branch or session on base branch |
+| Voice Channel | Voice Session | Talk to the agent with speech |
+
+When you message in a channel, a thread is created. Use `@branch-name` prefix to work on a specific branch, otherwise it creates a session on the base branch (e.g., `master`).
+
+Voice channels can be created with `/voice` and are linked to a thread's project/branch context. The bot joins, listens, and responds with speech.
 
 ## Structure Example
 
 ```
-FURTHERMORE (category)
-├── #main
-├── #issue-764-remove-ybgt
-├── #issue-840-vault-search
-└── Voice: furthermore-vc
-
 TAKOPI (category)
-├── #main
-├── #feat
-└── Voice: takopi-vc
+├── #main                 ← bound to ~/dev/takopi
+│   ├── feat/voice        ← thread on branch: feat/voice
+│   └── fix typo          ← session on master
+├── #discord              ← bound to ~/dev/takopi-discord
+└── 🔊 Voice: feat/voice  ← voice channel linked to feat/voice thread
 ```
 
 ## Installation
@@ -52,6 +53,7 @@ guild_id = 123456789             # Optional: restrict bot to single server
 message_overflow = "trim"        # "trim" (default) or "split" for long messages
 session_mode = "stateless"       # "stateless" (default) or "chat"
 show_resume_line = true          # Show resume token in messages (default: true)
+upload_dir = "~/uploads"         # Optional: enable /file commands with this root dir
 ```
 
 State is automatically saved to `~/.takopi/discord_state.json`.
@@ -66,41 +68,66 @@ State is automatically saved to `~/.takopi/discord_state.json`.
 
 ## Slash Commands
 
-- `/status` - Show current channel context and status
-- `/bind <project> [branch]` - Bind channel to a project and optional branch
+### Core Commands
+
+- `/bind <project> [worktrees_dir] [default_engine] [worktree_base]` - Bind channel to a project
 - `/unbind` - Remove project binding
+- `/status` - Show current channel/thread context and status
+- `/ctx [show|clear]` - Show or clear context binding
 - `/cancel` - Cancel running task
+- `/new` - Clear conversation session (start fresh)
+
+### Agent & Model Commands
+
+- `/agent` - Show available agents and current defaults
+- `/model [engine] [model]` - Show or set model override for an engine
+- `/reasoning [engine] [level]` - Show or set reasoning level (minimal/low/medium/high/xhigh)
+- `/trigger [all|mentions|clear]` - Set when bot responds (all messages or only @mentions)
+
+### File Transfer
+
+- `/file get <path>` - Download a file or directory (zipped) from the server
+- `/file put <path>` - Upload a file (attach file, then reply with this command)
+
+Requires `upload_dir` to be configured. Files in `.git`, `.env`, and credentials are blocked.
+
+### Voice
+
+- `/voice` or `/vc` - Create a voice channel for the current thread/channel
+
+The voice channel is bound to the project context and auto-deletes when empty.
 
 ## Message Features
 
 ### @branch Prefix
 
-Override the branch for a single message by prefixing with `@branch-name`:
+Start a conversation on a specific branch by prefixing with `@branch-name`:
 
 ```
 @feat/new-feature implement the login page
 @issue-123 fix the bug
 ```
 
-This creates a new thread bound to the specified branch. Only works in channels, not existing threads.
-
-### Automatic Channel Mapping
-
-Channel names are automatically mapped to branches:
-- `#main` or `#master` → main/master branch
-- `#issue-123` or `#issue-123-description` → corresponding branch
-- `#feat-name` → feat-name branch
-- Other channels use their name as the branch
+This creates a new thread bound to the specified branch. Without a prefix, threads work on the base branch (e.g., `master`).
 
 ### Thread Sessions
 
-- Messages automatically create threads for conversations
+- Messages in channels automatically create threads
 - Each thread maintains its own session with resume tokens
-- Multiple sessions can run simultaneously across channels/threads
+- Multiple sessions can run simultaneously across threads
 - Cancel button appears on progress messages for task cancellation
+
+### Trigger Modes
+
+Control when the bot responds:
+- **all** (default): Respond to all messages in bound channels/threads
+- **mentions**: Only respond when @mentioned or replied to
+
+Set per-channel or per-thread with `/trigger`.
 
 ## Discord Bot Permissions Required
 
+**Text:**
 - Read Messages / View Channels
 - Send Messages
 - Create Public Threads
@@ -110,6 +137,11 @@ Channel names are automatically mapped to branches:
 - Add Reactions
 - Attach Files
 - Use Slash Commands
+
+**Voice (optional, for `/voice` command):**
+- Connect
+- Speak
+- Manage Channels (to create/delete voice channels)
 
 ## Development
 

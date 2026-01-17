@@ -22,6 +22,7 @@ from .handlers import (
     extract_prompt_from_message,
     is_bot_mentioned,
     parse_branch_prefix,
+    register_engine_commands,
     register_slash_commands,
     should_process_message,
 )
@@ -116,6 +117,21 @@ async def run_main_loop(
         upload_dir=cfg.upload_dir,
         voice_manager=voice_manager,
     )
+
+    # Register dynamic engine commands (/claude, /codex, etc.)
+    engine_commands = register_engine_commands(
+        cfg.bot,
+        cfg=cfg,
+        state_store=state_store,
+        running_tasks=running_tasks,
+        default_engine_override=default_engine_override,
+    )
+    if engine_commands:
+        logger.info(
+            "engine_commands.registered",
+            count=len(engine_commands),
+            commands=sorted(engine_commands),
+        )
 
     # Discover and register plugin commands
     command_ids = discover_command_ids(cfg.runtime.allowlist)

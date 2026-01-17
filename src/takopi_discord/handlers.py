@@ -16,8 +16,10 @@ from .overrides import (
 )
 
 if TYPE_CHECKING:
+    from takopi.runner_bridge import RunningTasks
     from takopi.transport_runtime import TransportRuntime
 
+    from .bridge import DiscordBridgeConfig
     from .client import DiscordBotClient
     from .state import DiscordStateStore
     from .voice import VoiceManager
@@ -556,13 +558,6 @@ def register_slash_commands(
                 f"Trigger mode set to `{mode}` ({mode_desc}).", ephemeral=True
             )
 
-    # Note: Dynamic engine commands (like /claude, /codex) are not implemented
-    # for Discord because Discord slash commands work differently than Telegram.
-    # Users can:
-    # - Use /agent to see available engines
-    # - Use /model to set model overrides per engine
-    # - Use /bind with default_engine to set the channel's default engine
-
     # File transfer command (only if upload_dir is configured)
     if upload_dir is not None:
         from pathlib import Path
@@ -804,6 +799,179 @@ def _register_voice_commands(
     async def vc_command(ctx: discord.ApplicationContext) -> None:
         """Alias for /voice command."""
         await voice_command(ctx)
+
+
+def register_engine_commands(
+    bot: DiscordBotClient,
+    *,
+    cfg: DiscordBridgeConfig,
+    state_store: DiscordStateStore,
+    running_tasks: RunningTasks,
+    default_engine_override: str | None = None,
+) -> list[str]:
+    """Register dynamic slash commands for each available engine.
+
+    Creates commands like /claude, /codex, /pi that directly invoke
+    the corresponding engine with the prompt text.
+
+    Args:
+        bot: The Discord bot client
+        cfg: Bridge configuration
+        state_store: State store for resolving context and overrides
+        running_tasks: Running tasks dictionary
+        default_engine_override: Default engine override
+
+    Returns:
+        List of registered engine command names
+    """
+    from takopi.logging import get_logger
+
+    logger = get_logger(__name__)
+    pycord_bot = bot.bot
+    runtime = cfg.runtime
+
+    registered: list[str] = []
+
+    for engine_id in runtime.available_engine_ids():
+        cmd_name = engine_id.lower()
+        description = f"Use agent: {cmd_name}"
+
+        # Create a factory function to capture engine_id in closure
+        def make_engine_command(eng_id: str, cmd: str, desc: str):
+            @pycord_bot.slash_command(name=cmd, description=desc)
+            async def engine_command(
+                ctx: discord.ApplicationContext,
+                prompt: str = discord.Option(
+                    description="The prompt to send to the agent"
+                ),
+            ) -> None:
+                await _handle_engine_command(
+                    ctx,
+                    engine_id=eng_id,
+                    prompt=prompt,
+                    cfg=cfg,
+                    state_store=state_store,
+                    running_tasks=running_tasks,
+                )
+
+            return engine_command
+
+        make_engine_command(engine_id, cmd_name, description)
+        registered.append(cmd_name)
+        logger.info("engine_command.registered", engine=engine_id, command=cmd_name)
+
+    return registered
+
+
+async def _handle_engine_command(
+    ctx: discord.ApplicationContext,
+    *,
+    engine_id: str,
+    prompt: str,
+    cfg: DiscordBridgeConfig,
+    state_store: DiscordStateStore,
+    running_tasks: RunningTasks,
+) -> None:
+    """Handle a dynamic engine slash command invocation."""
+    from takopi.context import RunContext
+    from takopi.logging import get_logger
+    from takopi.runners.run_options import EngineRunOptions
+
+    from .commands.executor import _run_engine
+    from .types import DiscordChannelContext, DiscordThreadContext
+
+    logger = get_logger(__name__)
+
+    if ctx.guild is None:
+        await ctx.respond("This command can only be used in a server.", ephemeral=True)
+        return
+
+    # Defer to give us time to process (engine runs can take a while)
+    await ctx.defer()
+
+    guild_id = ctx.guild.id
+    channel_id = ctx.channel_id
+    thread_id = None
+
+    if isinstance(ctx.channel, discord.Thread):
+        thread_id = ctx.channel_id
+        if ctx.channel.parent_id:
+            channel_id = ctx.channel.parent_id
+
+    # Resolve context from state (same logic as message handling)
+    run_context: RunContext | None = None
+    channel_context: DiscordChannelContext | None = None
+    thread_context: DiscordThreadContext | None = None
+
+    if thread_id:
+        ctx_data = await state_store.get_context(guild_id, thread_id)
+        if isinstance(ctx_data, DiscordThreadContext):
+            thread_context = ctx_data
+
+    ctx_data = await state_store.get_context(guild_id, channel_id)
+    if isinstance(ctx_data, DiscordChannelContext):
+        channel_context = ctx_data
+
+    if thread_context:
+        run_context = RunContext(
+            project=thread_context.project,
+            branch=thread_context.branch,
+        )
+    elif channel_context:
+        run_context = RunContext(
+            project=channel_context.project,
+            branch=channel_context.worktree_base,
+        )
+
+    # Resolve model and reasoning overrides for this engine
+    overrides = await resolve_overrides(
+        state_store, guild_id, channel_id, thread_id, engine_id
+    )
+    run_options: EngineRunOptions | None = None
+    if overrides.model or overrides.reasoning:
+        run_options = EngineRunOptions(
+            model=overrides.model,
+            reasoning=overrides.reasoning,
+        )
+        logger.debug(
+            "engine_command.overrides",
+            engine=engine_id,
+            model=overrides.model,
+            reasoning=overrides.reasoning,
+        )
+
+    # Use the effective channel (thread if in one, otherwise channel)
+    effective_channel_id = thread_id or channel_id
+
+    logger.info(
+        "engine_command.run",
+        engine=engine_id,
+        guild_id=guild_id,
+        channel_id=effective_channel_id,
+        prompt_length=len(prompt),
+        has_context=run_context is not None,
+    )
+
+    # Run the engine
+    await _run_engine(
+        exec_cfg=cfg.exec_cfg,
+        runtime=cfg.runtime,
+        running_tasks=running_tasks,
+        channel_id=effective_channel_id,
+        user_msg_id=0,  # Slash commands don't have a message ID
+        text=prompt,
+        resume_token=None,  # Engine commands start fresh (no conversation resume)
+        context=run_context,
+        reply_ref=None,  # Slash commands don't reply to a message
+        on_thread_known=None,  # We don't track sessions for direct engine commands
+        engine_override=engine_id,
+        thread_id=thread_id,
+        show_resume_line=cfg.show_resume_line,
+        run_options=run_options,
+    )
+
+    # Send ephemeral acknowledgment to close the deferred interaction
+    await ctx.followup.send(f"✓ `/{engine_id.lower()}` completed", ephemeral=True)
 
 
 def is_bot_mentioned(message: discord.Message, bot_user: discord.User | None) -> bool:

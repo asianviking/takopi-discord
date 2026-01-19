@@ -193,7 +193,7 @@ def _confirm(console: Console, message: str, *, default: bool = True) -> bool | 
     return result
 
 
-def _prompt_token(console: Console) -> tuple[str, str, str] | None:
+async def _prompt_token(console: Console) -> tuple[str, str, str] | None:
     """Prompt for and validate a Discord bot token.
 
     Returns (token, bot_id, bot_name) if successful.
@@ -208,7 +208,7 @@ def _prompt_token(console: Console) -> tuple[str, str, str] | None:
             continue
         console.print("  validating...")
         with suppress_logs():
-            result = anyio.run(_validate_discord_token, token)
+            result = await _validate_discord_token(token)
         if result:
             bot_id, bot_name = result
             console.print(f"  connected to {bot_name} (ID: {bot_id})")
@@ -219,7 +219,7 @@ def _prompt_token(console: Console) -> tuple[str, str, str] | None:
             return None
 
 
-def interactive_setup(*, force: bool) -> bool:
+async def interactive_setup(*, force: bool) -> bool:
     """Run interactive setup for Discord transport."""
     console = Console()
     config_path = HOME_CONFIG_PATH
@@ -264,7 +264,7 @@ def interactive_setup(*, force: bool) -> bool:
             )
             console.print("")
 
-        token_info = _prompt_token(console)
+        token_info = await _prompt_token(console)
         if token_info is None:
             return False
         token, bot_id, bot_name = token_info

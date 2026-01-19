@@ -86,8 +86,8 @@ class DiscordBackend(TransportBackend):
     ) -> SetupResult:
         return check_setup(engine_backend, transport_override=transport_override)
 
-    def interactive_setup(self, *, force: bool) -> bool:
-        return interactive_setup(force=force)
+    async def interactive_setup(self, *, force: bool) -> bool:
+        return await interactive_setup(force=force)
 
     def lock_token(self, *, transport_config: object, _config_path: Path) -> str | None:
         settings = _get_discord_settings(transport_config)

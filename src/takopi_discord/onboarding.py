@@ -187,9 +187,9 @@ def _render_engine_table(console: Console) -> list[tuple[str, bool, str | None]]
     return rows
 
 
-def _confirm(console: Console, message: str, *, default: bool = True) -> bool | None:
+async def _confirm(message: str, *, default: bool = True) -> bool | None:
     """Simple yes/no confirmation."""
-    result = questionary.confirm(message, default=default).ask()
+    result = await questionary.confirm(message, default=default).ask_async()
     return result
 
 
@@ -199,7 +199,7 @@ async def _prompt_token(console: Console) -> tuple[str, str, str] | None:
     Returns (token, bot_id, bot_name) if successful.
     """
     while True:
-        token = questionary.password("paste your discord bot token:").ask()
+        token = await questionary.password("paste your discord bot token:").ask_async()
         if token is None:
             return None
         token = token.strip()
@@ -214,7 +214,7 @@ async def _prompt_token(console: Console) -> tuple[str, str, str] | None:
             console.print(f"  connected to {bot_name} (ID: {bot_id})")
             return token, bot_id, bot_name
         console.print("  failed to connect, check the token and try again")
-        retry = _confirm(console, "try again?", default=True)
+        retry = await _confirm("try again?", default=True)
         if not retry:
             return None
 
@@ -232,8 +232,7 @@ async def interactive_setup(*, force: bool) -> bool:
         return True
 
     if config_path.exists() and force:
-        overwrite = _confirm(
-            console,
+        overwrite = await _confirm(
             f"update existing config at {_display_path(config_path)}?",
             default=False,
         )
@@ -251,7 +250,7 @@ async def interactive_setup(*, force: bool) -> bool:
         console.print(panel)
 
         console.print("step 1: discord bot setup\n")
-        have_token = _confirm(console, "do you have a discord bot token?")
+        have_token = await _confirm("do you have a discord bot token?")
         if have_token is None:
             return False
         if not have_token:
@@ -280,11 +279,9 @@ async def interactive_setup(*, force: bool) -> bool:
 
         # Optional: prompt for guild ID
         guild_id: int | None = None
-        use_guild = _confirm(
-            console, "restrict bot to a specific server?", default=False
-        )
+        use_guild = await _confirm("restrict bot to a specific server?", default=False)
         if use_guild:
-            guild_id_str = questionary.text("enter server (guild) ID:").ask()
+            guild_id_str = await questionary.text("enter server (guild) ID:").ask_async()
             if guild_id_str:
                 try:
                     guild_id = int(guild_id_str.strip())
@@ -297,15 +294,15 @@ async def interactive_setup(*, force: bool) -> bool:
 
         default_engine: str | None = None
         if installed_ids:
-            default_engine = questionary.select(
+            default_engine = await questionary.select(
                 "choose default agent:",
                 choices=installed_ids,
-            ).ask()
+            ).ask_async()
             if default_engine is None:
                 return False
         else:
             console.print("no agents found on PATH. install one to continue.")
-            save_anyway = _confirm(console, "save config anyway?", default=False)
+            save_anyway = await _confirm("save config anyway?", default=False)
             if not save_anyway:
                 return False
 
@@ -328,8 +325,7 @@ async def interactive_setup(*, force: bool) -> bool:
             console.print(f"  {line}")
         console.print("")
 
-        save = _confirm(
-            console,
+        save = await _confirm(
             f"save this config to {_display_path(config_path)}?",
             default=True,
         )

@@ -309,6 +309,17 @@ async def run_main_loop(
         thread_id = None
         is_new_thread = False
 
+        # Auto-set startup channel on first interaction (if not already set)
+        if state_store and not isinstance(message.channel, discord.Thread):
+            current_startup = await state_store.get_startup_channel(guild_id)
+            if current_startup is None:
+                await state_store.set_startup_channel(guild_id, channel_id)
+                logger.info(
+                    "startup_channel.auto_set",
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                )
+
         # Check if this is a thread
         if isinstance(message.channel, discord.Thread):
             thread_id = message.channel.id
@@ -766,13 +777,23 @@ async def run_main_loop(
     # Start the bot
     await cfg.bot.start()
 
-    # Send startup message to first available text channel
+    # Send startup message to configured channel or first available text channel
     if cfg.guild_id:
-        guild = cfg.bot.get_guild(cfg.guild_id)
-        if guild:
-            for channel in guild.text_channels:
-                await _send_startup(cfg, channel.id)
-                break
+        startup_channel_id = await state_store.get_startup_channel(cfg.guild_id)
+        if startup_channel_id:
+            await _send_startup(cfg, startup_channel_id)
+            logger.info("startup.configured_channel", channel_id=startup_channel_id)
+        else:
+            guild = cfg.bot.get_guild(cfg.guild_id)
+            if guild:
+                for channel in guild.text_channels:
+                    await _send_startup(cfg, channel.id)
+                    logger.info(
+                        "startup.first_channel",
+                        channel_id=channel.id,
+                        hint="mention bot in preferred channel to set as startup channel",
+                    )
+                    break
 
     logger.info("bot.ready", user=cfg.bot.user.name if cfg.bot.user else "unknown")
 

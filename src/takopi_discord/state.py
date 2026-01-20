@@ -28,11 +28,18 @@ class DiscordChannelStateData(msgspec.Struct):
     default_engine: str | None = None  # default engine for this channel/thread
 
 
+class DiscordGuildData(msgspec.Struct):
+    """State data for a guild."""
+
+    startup_channel_id: int | None = None
+
+
 class DiscordState(msgspec.Struct):
     """Root state structure."""
 
     version: int = STATE_VERSION
     channels: dict[str, DiscordChannelStateData] = msgspec.field(default_factory=dict)
+    guilds: dict[str, DiscordGuildData] = msgspec.field(default_factory=dict)
 
 
 def _atomic_write_json(path: Path, data: Any) -> None:
@@ -388,3 +395,24 @@ class DiscordStateStore:
                 channel_data.trigger_mode,
                 channel_data.default_engine,
             )
+
+    # Guild-level methods
+    async def get_startup_channel(self, guild_id: int) -> int | None:
+        """Get the startup channel for a guild."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = str(guild_id)
+            guild_data = self._state.guilds.get(key)
+            if guild_data is None:
+                return None
+            return guild_data.startup_channel_id
+
+    async def set_startup_channel(self, guild_id: int, channel_id: int | None) -> None:
+        """Set the startup channel for a guild."""
+        async with self._lock:
+            self._reload_if_needed()
+            key = str(guild_id)
+            if key not in self._state.guilds:
+                self._state.guilds[key] = DiscordGuildData()
+            self._state.guilds[key].startup_channel_id = channel_id
+            self._save()

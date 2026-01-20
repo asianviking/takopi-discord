@@ -281,7 +281,9 @@ async def interactive_setup(*, force: bool) -> bool:
         guild_id: int | None = None
         use_guild = await _confirm("restrict bot to a specific server?", default=False)
         if use_guild:
-            guild_id_str = await questionary.text("enter server (guild) ID:").ask_async()
+            guild_id_str = await questionary.text(
+                "enter server (guild) ID:"
+            ).ask_async()
             if guild_id_str:
                 try:
                     guild_id = int(guild_id_str.strip())
@@ -369,7 +371,9 @@ async def interactive_setup(*, force: bool) -> bool:
         console.print(f"  config saved to {_display_path(config_path)}")
 
         done_panel = Panel(
-            "setup complete. run 'takopi run' to start takopi-discord!",
+            "setup complete. run 'takopi run' to start takopi-discord!\n\n"
+            "tip: the first channel you message the bot in will become\n"
+            "the startup channel where status messages are posted.",
             border_style="green",
             padding=(1, 2),
             expand=False,

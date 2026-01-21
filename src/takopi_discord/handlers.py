@@ -1058,8 +1058,8 @@ def should_process_message(
     if message.author.bot:
         return False
 
-    # Ignore empty messages
-    if not message.content.strip():
+    # Ignore empty messages (but allow if there are attachments for auto_put)
+    if not message.content.strip() and not message.attachments:
         return False
 
     # In threads, always process

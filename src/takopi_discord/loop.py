@@ -872,7 +872,10 @@ async def run_main_loop(
 
         # Check for transport config changes
         if transport_snapshot is not None:
-            new_snapshot = reload.settings.transports.get("discord")
+            # Discord config is in model_extra since it's a plugin transport
+            new_snapshot = getattr(reload.settings.transports, "model_extra", {}).get(
+                "discord"
+            )
             if isinstance(new_snapshot, dict):
                 changed = _diff_keys(transport_snapshot, new_snapshot)
                 if changed:

@@ -558,6 +558,12 @@ async def run_main_loop(
         )
 
         # Handle auto_put for file attachments
+        logger.debug(
+            "auto_put.check",
+            files_enabled=cfg.files.enabled,
+            auto_put=cfg.files.auto_put,
+            attachment_count=len(message.attachments),
+        )
         if cfg.files.enabled and cfg.files.auto_put and message.attachments:
             from takopi.config import ConfigError
 

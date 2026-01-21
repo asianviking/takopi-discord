@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from takopi.runner_bridge import RunningTasks
     from takopi.transport_runtime import TransportRuntime
 
-    from .bridge import DiscordBridgeConfig
+    from .bridge import DiscordBridgeConfig, DiscordFilesSettings
     from .client import DiscordBotClient
     from .state import DiscordStateStore
     from .voice import VoiceManager
@@ -56,7 +56,7 @@ def register_slash_commands(
     get_running_task: callable,
     cancel_task: callable,
     runtime: TransportRuntime | None = None,
-    upload_dir: str | None = None,
+    files: DiscordFilesSettings | None = None,
     voice_manager: VoiceManager | None = None,
 ) -> None:
     """Register slash commands with the bot."""
@@ -558,12 +558,14 @@ def register_slash_commands(
                 f"Trigger mode set to `{mode}` ({mode_desc}).", ephemeral=True
             )
 
-    # File transfer command (only if upload_dir is configured)
-    if upload_dir is not None:
+    # File transfer command (only if files is enabled)
+    if files is not None and files.enabled and runtime is not None:
         from pathlib import Path
 
+        from takopi.config import ConfigError
+        from takopi.context import RunContext
+
         from .file_transfer import (
-            DEFAULT_DENY_GLOBS,
             MAX_FILE_SIZE,
             ZipTooLargeError,
             deny_reason,
@@ -572,8 +574,55 @@ def register_slash_commands(
             resolve_path_within_root,
             zip_directory,
         )
+        from .types import DiscordChannelContext, DiscordThreadContext
 
-        upload_root = Path(upload_dir).expanduser().resolve()
+        async def _get_project_root(
+            ctx: discord.ApplicationContext,
+        ) -> tuple[Path | None, RunContext | None]:
+            """Get the project root directory for the current channel context."""
+            if ctx.guild is None:
+                return None, None
+
+            guild_id = ctx.guild.id
+            channel_id = ctx.channel_id
+            if channel_id is None:
+                return None, None
+
+            # Get context - check thread first, then parent channel
+            context = None
+            channel = ctx.channel
+
+            if isinstance(channel, discord.Thread):
+                context = await state_store.get_context(guild_id, channel.id)
+                if context is None and channel.parent_id:
+                    context = await state_store.get_context(guild_id, channel.parent_id)
+            else:
+                context = await state_store.get_context(guild_id, channel_id)
+
+            if context is None:
+                return None, None
+
+            # Build RunContext
+            if isinstance(context, DiscordThreadContext):
+                run_context = RunContext(
+                    project=context.project,
+                    branch=context.branch,
+                )
+            elif isinstance(context, DiscordChannelContext):
+                run_context = RunContext(
+                    project=context.project,
+                    branch=context.worktree_base,
+                )
+            else:
+                return None, None
+
+            # Resolve working directory
+            try:
+                run_root = runtime.resolve_run_cwd(run_context)
+            except ConfigError:
+                return None, None
+
+            return run_root, run_context
 
         @pycord_bot.slash_command(name="file", description="Upload or download files")
         async def file_command(
@@ -583,7 +632,7 @@ def register_slash_commands(
                 choices=["get", "put"],
             ),
             path: str = discord.Option(
-                description="File path relative to upload directory",
+                description="File path relative to project directory",
             ),
         ) -> None:
             """Handle file transfers."""
@@ -597,6 +646,18 @@ def register_slash_commands(
             if not await _require_admin(ctx):
                 return
 
+            # Get project root from channel context
+            project_root, run_context = await _get_project_root(ctx)
+            if project_root is None:
+                await ctx.respond(
+                    "This channel is not bound to a project.\n"
+                    "Use `/bind <project>` first to enable file transfers.",
+                    ephemeral=True,
+                )
+                return
+
+            deny_globs = files.deny_globs
+
             if action == "get":
                 # Download file from server
                 rel_path = normalize_relative_path(path)
@@ -607,16 +668,16 @@ def register_slash_commands(
                     )
                     return
 
-                denied = deny_reason(rel_path, DEFAULT_DENY_GLOBS)
+                denied = deny_reason(rel_path, deny_globs)
                 if denied:
                     await ctx.respond(
                         f"Path denied by rule: `{denied}`", ephemeral=True
                     )
                     return
 
-                target = resolve_path_within_root(upload_root, rel_path)
+                target = resolve_path_within_root(project_root, rel_path)
                 if target is None:
-                    await ctx.respond("Path escapes upload directory.", ephemeral=True)
+                    await ctx.respond("Path escapes project directory.", ephemeral=True)
                     return
 
                 if not target.exists():
@@ -630,9 +691,9 @@ def register_slash_commands(
                         # Zip the directory
                         try:
                             zip_data = zip_directory(
-                                upload_root,
+                                project_root,
                                 rel_path,
-                                DEFAULT_DENY_GLOBS,
+                                deny_globs,
                                 max_bytes=MAX_FILE_SIZE,
                             )
                         except ZipTooLargeError:
@@ -672,10 +733,9 @@ def register_slash_commands(
             elif action == "put":
                 # Upload requires an attachment - show instructions
                 await ctx.respond(
-                    "To upload a file:\n"
-                    "1. Send a message with the file attached\n"
-                    "2. Reply to that message with `/file put <path>`\n\n"
-                    "Or use the message command (right-click message > Apps > Save File)",
+                    "To upload a file, send it as an attachment with your message.\n"
+                    f"Files will be automatically saved to `{files.uploads_dir}/` "
+                    "when `auto_put` is enabled.",
                     ephemeral=True,
                 )
 

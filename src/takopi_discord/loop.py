@@ -114,7 +114,7 @@ async def run_main_loop(
         get_running_task=get_running_task,
         cancel_task=cancel_task,
         runtime=cfg.runtime,
-        upload_dir=cfg.upload_dir,
+        files=cfg.files,
         voice_manager=voice_manager,
     )
 
@@ -555,6 +555,73 @@ async def run_main_loop(
             is_new_thread=is_new_thread,
             has_resume_token=resume_token is not None,
         )
+
+        # Handle auto_put for file attachments
+        if cfg.files.enabled and cfg.files.auto_put and message.attachments:
+            from takopi.config import ConfigError
+
+            from .file_transfer import format_bytes, save_attachment
+
+            # Need a project context to save files
+            if run_context is None or run_context.project is None:
+                logger.debug(
+                    "auto_put.skipped",
+                    reason="no project context",
+                    attachment_count=len(message.attachments),
+                )
+            else:
+                try:
+                    run_root = cfg.runtime.resolve_run_cwd(run_context)
+                except ConfigError as exc:
+                    logger.warning("auto_put.cwd_error", error=str(exc))
+                    run_root = None
+
+                if run_root is not None:
+                    file_annotations: list[str] = []
+                    saved_files: list[str] = []
+
+                    for attachment in message.attachments:
+                        result = await save_attachment(
+                            attachment,
+                            run_root,
+                            cfg.files.uploads_dir,
+                            cfg.files.deny_globs,
+                            max_bytes=cfg.files.max_upload_bytes,
+                        )
+                        if result.error is not None:
+                            logger.warning(
+                                "auto_put.failed",
+                                filename=attachment.filename,
+                                error=result.error,
+                            )
+                        elif result.rel_path is not None and result.size is not None:
+                            logger.info(
+                                "auto_put.saved",
+                                filename=attachment.filename,
+                                rel_path=result.rel_path.as_posix(),
+                                size=result.size,
+                            )
+                            file_annotations.append(
+                                f"[uploaded file: {result.rel_path.as_posix()}]"
+                            )
+                            saved_files.append(
+                                f"`{result.rel_path.as_posix()}` ({format_bytes(result.size)})"
+                            )
+
+                    # Handle based on auto_put_mode
+                    if cfg.files.auto_put_mode == "prompt" and file_annotations:
+                        # Prepend file annotations to the prompt
+                        prompt = "\n".join(file_annotations) + "\n\n" + prompt
+                        logger.debug(
+                            "auto_put.annotated",
+                            annotation_count=len(file_annotations),
+                        )
+                    elif cfg.files.auto_put_mode == "upload" and saved_files:
+                        # Just confirm the upload if no prompt
+                        if not prompt.strip():
+                            confirm_msg = "saved " + ", ".join(saved_files)
+                            await message.reply(confirm_msg, mention_author=False)
+                            return
 
         # For new threads, use thread_id as channel_id since that's where we're sending
         # For existing threads/channels, thread_id already specifies where to send

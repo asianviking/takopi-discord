@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DiscordBridgeConfig",
+    "DiscordFilesSettings",
     "DiscordPresenter",
     "DiscordTransport",
 ]
@@ -121,6 +122,24 @@ def _is_cancelled_label(label: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscordFilesSettings:
+    """Settings for file transfer functionality."""
+
+    enabled: bool = False
+    auto_put: bool = True
+    auto_put_mode: Literal["upload", "prompt"] = "upload"
+    uploads_dir: str = "incoming"
+    max_upload_bytes: int = 20 * 1024 * 1024  # 20MB
+    deny_globs: tuple[str, ...] = (
+        ".git/**",
+        ".env",
+        ".envrc",
+        "**/*.pem",
+        "**/.ssh/**",
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class DiscordBridgeConfig:
     """Configuration for the Discord bridge."""
 
@@ -132,7 +151,7 @@ class DiscordBridgeConfig:
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
     message_overflow: Literal["trim", "split"] = "split"
-    upload_dir: str | None = None  # Directory for file transfers
+    files: DiscordFilesSettings = DiscordFilesSettings()
 
 
 # Type alias for message listener callbacks

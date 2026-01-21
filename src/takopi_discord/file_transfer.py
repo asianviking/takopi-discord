@@ -8,16 +8,24 @@ import shlex
 import tempfile
 import zipfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import discord
 
 __all__ = [
+    "SaveAttachmentResult",
     "ZipTooLargeError",
     "default_upload_name",
+    "default_upload_path",
     "deny_reason",
     "format_bytes",
     "normalize_relative_path",
     "parse_file_command",
     "resolve_path_within_root",
+    "save_attachment",
     "write_bytes_atomic",
     "zip_directory",
 ]
@@ -184,3 +192,107 @@ def zip_directory(
     if max_bytes is not None and len(payload) > max_bytes:
         raise ZipTooLargeError()
     return payload
+
+
+def default_upload_path(uploads_dir: str, filename: str | None) -> Path:
+    """Generate the default upload path for a file.
+
+    Args:
+        uploads_dir: The uploads directory (e.g., "incoming")
+        filename: The original filename
+
+    Returns:
+        Relative path like "incoming/filename.txt"
+    """
+    name = default_upload_name(filename)
+    return Path(uploads_dir) / name
+
+
+@dataclass(slots=True)
+class SaveAttachmentResult:
+    """Result of saving an attachment."""
+
+    rel_path: Path | None
+    size: int | None
+    error: str | None
+
+
+async def save_attachment(
+    attachment: discord.Attachment,
+    run_root: Path,
+    uploads_dir: str,
+    deny_globs: Sequence[str],
+    *,
+    max_bytes: int = 20 * 1024 * 1024,
+) -> SaveAttachmentResult:
+    """Save a Discord attachment to the project directory.
+
+    Args:
+        attachment: The Discord attachment to save
+        run_root: The project root directory
+        uploads_dir: Relative directory for uploads (e.g., "incoming")
+        deny_globs: Glob patterns to deny
+        max_bytes: Maximum file size in bytes
+
+    Returns:
+        SaveAttachmentResult with rel_path and size on success, or error on failure
+    """
+    filename = attachment.filename
+    name = default_upload_name(filename)
+
+    # Check file size
+    if attachment.size > max_bytes:
+        return SaveAttachmentResult(
+            rel_path=None,
+            size=None,
+            error="file is too large to upload",
+        )
+
+    # Build the relative path
+    rel_path = default_upload_path(uploads_dir, filename)
+
+    # Check deny rules
+    deny_rule = deny_reason(rel_path, deny_globs)
+    if deny_rule is not None:
+        return SaveAttachmentResult(
+            rel_path=None,
+            size=None,
+            error=f"path denied by rule: {deny_rule}",
+        )
+
+    # Resolve target path
+    target = resolve_path_within_root(run_root, rel_path)
+    if target is None:
+        return SaveAttachmentResult(
+            rel_path=None,
+            size=None,
+            error="upload path escapes the project root",
+        )
+
+    # Check if file already exists
+    if target.exists():
+        if target.is_dir():
+            return SaveAttachmentResult(
+                rel_path=None,
+                size=None,
+                error=f"`{name}` is a directory",
+            )
+        # For auto_put, we overwrite existing files silently
+        # (unlike manual /file put which may want --force)
+
+    # Download and save the file
+    try:
+        payload = await attachment.read()
+        write_bytes_atomic(target, payload)
+    except Exception as e:
+        return SaveAttachmentResult(
+            rel_path=None,
+            size=None,
+            error=f"failed to save file: {e}",
+        )
+
+    return SaveAttachmentResult(
+        rel_path=rel_path,
+        size=len(payload),
+        error=None,
+    )

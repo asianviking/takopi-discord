@@ -84,11 +84,11 @@ class TestConfigReloadIntegration:
         from takopi_discord.loop import discover_command_ids
 
         # Start with no commands
-        with patch.object(
-            discover_command_ids, "__wrapped__", return_value=set()
-        ) if hasattr(discover_command_ids, "__wrapped__") else patch(
-            "takopi_discord.loop.discover_command_ids"
-        ) as mock_discover:
+        with (
+            patch.object(discover_command_ids, "__wrapped__", return_value=set())
+            if hasattr(discover_command_ids, "__wrapped__")
+            else patch("takopi_discord.loop.discover_command_ids") as mock_discover
+        ):
             mock_discover.return_value = {"new_plugin"}
 
             # We can't easily test the full handle_reload without running the loop,

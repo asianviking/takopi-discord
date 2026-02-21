@@ -61,6 +61,18 @@ def _diff_keys(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
     return sorted(key for key in keys if old.get(key) != new.get(key))
 
 
+async def _save_session_token(
+    *,
+    state_store: DiscordStateStore | None,
+    guild_id: int | None,
+    session_key: int,
+    token: ResumeToken,
+) -> None:
+    if state_store is None or guild_id is None:
+        return
+    await state_store.set_session(guild_id, session_key, token.engine, token.value)
+
+
 async def run_main_loop(
     cfg: DiscordBridgeConfig,
     *,
@@ -168,6 +180,7 @@ async def run_main_loop(
         text: str,
         resume_token: ResumeToken | None,
         context: RunContext | None,
+        engine_id: str | None,
         thread_id: int | None = None,
         reply_ref: MessageRef | None = None,
         guild_id: int | None = None,
@@ -194,7 +207,7 @@ async def run_main_loop(
             # Resolve the runner
             resolved = cfg.runtime.resolve_runner(
                 resume_token=resume_token,
-                engine_override=default_engine_override,
+                engine_override=default_engine_override or engine_id,
             )
             if not resolved.available:
                 logger.error(
@@ -252,19 +265,21 @@ async def run_main_loop(
                         if len(new_token.value) > 20
                         else new_token.value,
                     )
+                    # Save to thread_id if present, otherwise channel_id
+                    # This matches the retrieval logic in handle_message
+                    save_key = thread_id if thread_id else channel_id
+                    await _save_session_token(
+                        state_store=state_store,
+                        guild_id=guild_id,
+                        session_key=save_key,
+                        token=new_token,
+                    )
                     if state_store and guild_id:
-                        engine_id = cfg.runtime.default_engine or "claude"
-                        # Save to thread_id if present, otherwise channel_id
-                        # This matches the retrieval logic in handle_message
-                        save_key = thread_id if thread_id else channel_id
-                        await state_store.set_session(
-                            guild_id, save_key, engine_id, new_token.value
-                        )
                         logger.info(
                             "session.saved",
                             guild_id=guild_id,
                             session_key=save_key,
-                            engine_id=engine_id,
+                            engine_id=new_token.engine,
                         )
                     else:
                         logger.debug(
@@ -669,6 +684,7 @@ async def run_main_loop(
                 text=prompt,
                 resume_token=resume_token,
                 context=run_context,
+                engine_id=engine_id,
                 thread_id=thread_id,
                 reply_ref=reply_ref,
                 guild_id=guild_id,
@@ -795,6 +811,7 @@ async def run_main_loop(
                     text=transcript,
                     resume_token=resume_token,
                     context=run_context,
+                    engine_id=engine_id,
                     thread_id=None,
                     reply_ref=None,
                     guild_id=guild_id,

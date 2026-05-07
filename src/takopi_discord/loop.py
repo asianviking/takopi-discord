@@ -873,7 +873,12 @@ async def run_main_loop(
             )
             return
 
-        if not should_process_message(message, cfg.bot.user, require_mention=False):
+        if not should_process_message(
+            message,
+            cfg.bot.user,
+            require_mention=False,
+            allowed_bot_user_ids=cfg.allowed_bot_user_ids,
+        ):
             logger.debug(
                 "message.skipped", reason="should_process_message returned False"
             )

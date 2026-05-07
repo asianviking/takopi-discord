@@ -160,6 +160,7 @@ class DiscordBridgeConfig:
     startup_msg: str
     exec_cfg: ExecBridgeConfig
     allowed_user_ids: frozenset[int] | None = None
+    allowed_bot_user_ids: frozenset[int] | None = None
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
     message_overflow: Literal["trim", "split"] = "split"

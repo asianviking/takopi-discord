@@ -1,6 +1,12 @@
 """Tests for handlers module."""
 
-from takopi_discord.handlers import _format_engine_starter_message, parse_branch_prefix
+from types import SimpleNamespace
+
+from takopi_discord.handlers import (
+    _format_engine_starter_message,
+    parse_branch_prefix,
+    should_process_message,
+)
 
 
 class TestParseBranchPrefix:
@@ -65,6 +71,25 @@ class TestParseBranchPrefix:
         branch, prompt = parse_branch_prefix("@issue-123/fix-bug/v2 do the thing")
         assert branch == "issue-123/fix-bug/v2"
         assert prompt == "do the thing"
+
+
+class TestShouldProcessMessage:
+    def test_allowlisted_bot_sender_is_processed(self) -> None:
+        bot_user = SimpleNamespace(id=999)
+        message = SimpleNamespace(
+            author=SimpleNamespace(bot=True, id=123),
+            content="please merge this",
+            attachments=[],
+            channel=SimpleNamespace(),
+            mentions=[],
+        )
+
+        assert should_process_message(
+            message,
+            bot_user,
+            require_mention=False,
+            allowed_bot_user_ids=frozenset({123}),
+        )
 
 
 class TestFormatEngineStarterMessage:

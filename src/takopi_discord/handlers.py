@@ -1566,6 +1566,7 @@ def should_process_message(
     bot_user: discord.User | None,
     *,
     require_mention: bool = False,
+    allowed_bot_user_ids: frozenset[int] | None = None,
 ) -> bool:
     """Determine if a message should be processed by the bot.
 
@@ -1573,10 +1574,14 @@ def should_process_message(
         message: The Discord message
         bot_user: The bot's user object
         require_mention: If True, only process messages that mention the bot
+        allowed_bot_user_ids: Bot sender IDs that are trusted to bypass the
+            default bot-message ignore rule
     """
-    # Ignore bot messages
+    # Ignore bot messages unless the sender is explicitly allowlisted.
     if message.author.bot:
-        return False
+        author_id = getattr(message.author, "id", None)
+        if not isinstance(author_id, int) or author_id not in (allowed_bot_user_ids or frozenset()):
+            return False
 
     # Ignore empty messages (but allow if there are attachments for auto_put)
     if not message.content.strip() and not message.attachments:

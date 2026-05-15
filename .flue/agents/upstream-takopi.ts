@@ -12,7 +12,7 @@ export const triggers = {};
 
 const TRACKING_LABEL = "upstream-takopi";
 const AGENT_LABEL = "agent-triage";
-const DEFAULT_MODEL = "moonshotai/kimi-k2.6";
+const DEFAULT_MODEL = "kimi-coding/kimi-for-coding";
 
 const analysisSchema = v.object({
   relevant: v.boolean(),

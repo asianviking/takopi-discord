@@ -11,7 +11,9 @@ from takopi_discord.commands.dispatch import dispatch_command
 
 
 @pytest.mark.anyio
-async def test_dispatch_command_populates_sender_id(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dispatch_command_populates_sender_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """MessageRef passed to CommandContext should carry sender_id."""
     cfg = MagicMock()
     cfg.runtime = MagicMock()
@@ -49,7 +51,9 @@ async def test_dispatch_command_populates_sender_id(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.anyio
-async def test_dispatch_command_sender_id_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dispatch_command_sender_id_defaults_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """MessageRef.sender_id should default to None when not provided."""
     cfg = MagicMock()
     cfg.runtime = MagicMock()

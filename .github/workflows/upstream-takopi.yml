@@ -82,6 +82,7 @@ jobs:
       - name: Analyze upstream Takopi
         env:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY || secrets.KIMI_API_KEY }}
           FLUE_MODEL: ${{ vars.FLUE_MODEL || 'moonshotai/kimi-k2.6' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run upstream:takopi -- --target node --id takopi-upstream --payload "$(cat /tmp/upstream-takopi-payload.json)"

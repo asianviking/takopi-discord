@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import takopi_discord.loop as loop_module
-from takopi_discord.bridge import DiscordBridgeConfig, DiscordFilesSettings, DiscordVoiceMessageSettings
+from takopi_discord.bridge import (
+    DiscordBridgeConfig,
+    DiscordFilesSettings,
+    DiscordVoiceMessageSettings,
+)
+from takopi_discord.loop import _is_message_author_allowed
 
 
 class _StopLoop(RuntimeError):
@@ -62,6 +67,39 @@ def _runtime_stub(config_path: Path) -> MagicMock:
     runtime.watch_config = False
     runtime.engine_ids = ["codex"]
     return runtime
+
+
+def test_allowed_bot_user_ids_bypass_human_allowlist() -> None:
+    assert _is_message_author_allowed(
+        allowed_user_ids=frozenset({456}),
+        allowed_bot_user_ids=frozenset({123}),
+        author_id=123,
+        author_is_bot=True,
+    )
+
+
+def test_untrusted_bot_sender_still_uses_human_allowlist() -> None:
+    assert not _is_message_author_allowed(
+        allowed_user_ids=frozenset({456}),
+        allowed_bot_user_ids=frozenset({789}),
+        author_id=123,
+        author_is_bot=True,
+    )
+
+
+def test_human_sender_still_uses_human_allowlist() -> None:
+    assert _is_message_author_allowed(
+        allowed_user_ids=frozenset({456}),
+        allowed_bot_user_ids=frozenset({123}),
+        author_id=456,
+        author_is_bot=False,
+    )
+    assert not _is_message_author_allowed(
+        allowed_user_ids=frozenset({456}),
+        allowed_bot_user_ids=frozenset({123}),
+        author_id=123,
+        author_is_bot=False,
+    )
 
 
 @pytest.mark.anyio

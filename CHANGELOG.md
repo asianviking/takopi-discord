@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-16
+
+### Added
+- `transports.discord.allowed_bot_user_ids` for explicitly trusted bot-authored Discord messages
+
+### Fixed
+- Allow trusted bot senders through the Discord message gate without also requiring them in `allowed_user_ids`
+
 ## [0.5.0] - 2026-02-25
 
 ### Added

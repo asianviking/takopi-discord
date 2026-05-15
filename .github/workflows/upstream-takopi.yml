@@ -1,0 +1,87 @@
+name: Track upstream Takopi
+
+on:
+  schedule:
+    - cron: "37 14 * * *"
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: "Optional upstream base ref to compare from"
+        required: false
+        type: string
+      target_ref:
+        description: "Optional upstream target ref to analyze"
+        required: false
+        type: string
+      create_pr:
+        description: "Whether to open a draft PR when the agent recommends implementation"
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - always
+          - never
+      dry_run:
+        description: "Analyze only; do not create GitHub issues or PRs"
+        required: true
+        default: false
+        type: boolean
+      force:
+        description: "Ignore existing upstream-tracking issues for the same ref"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-takopi
+  cancel-in-progress: false
+
+jobs:
+  upstream-takopi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22.18"
+          cache: npm
+
+      - name: Install automation dependencies
+        run: npm ci
+
+      - name: Build Flue payload
+        run: |
+          cat > /tmp/upstream-takopi-payload.json <<'JSON'
+          {
+            "owner": "${{ github.repository_owner }}",
+            "repo": "${{ github.event.repository.name }}",
+            "upstreamOwner": "banteg",
+            "upstreamRepo": "takopi",
+            "baseRef": "${{ inputs.base_ref }}",
+            "targetRef": "${{ inputs.target_ref }}",
+            "createPr": "${{ inputs.create_pr || 'auto' }}",
+            "dryRun": ${{ inputs.dry_run || false }},
+            "force": ${{ inputs.force || false }}
+          }
+          JSON
+
+      - name: Analyze upstream Takopi
+        env:
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          FLUE_MODEL: ${{ vars.FLUE_MODEL || 'moonshotai/kimi-k2.6' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run upstream:takopi -- --target node --id takopi-upstream --payload "$(cat /tmp/upstream-takopi-payload.json)"

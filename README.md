@@ -64,6 +64,7 @@ enabled = false                  # Enable /file + attachment auto-upload
 # auto_put_mode = "upload"       # "upload" (default) or "prompt"
 uploads_dir = "incoming"         # Relative path in the repo
 # max_upload_bytes = 20971520    # 20MB
+# max_download_bytes = 10485760  # 10MB Discord base upload limit; raise for boosted/Nitro-capable servers
 # deny_globs = [".git/**", ".env", ".envrc", "**/*.pem", "**/.ssh/**"]
 # allowed_user_ids = [123456789012345678]  # Optional: restrict file transfers separately
 

@@ -179,6 +179,9 @@ class DiscordBackend(TransportBackend):
             auto_put_mode=files_settings.get("auto_put_mode", "upload"),
             uploads_dir=files_settings.get("uploads_dir", "incoming"),
             max_upload_bytes=files_settings.get("max_upload_bytes", 20 * 1024 * 1024),
+            max_download_bytes=files_settings.get(
+                "max_download_bytes", 10 * 1024 * 1024
+            ),
             deny_globs=tuple(
                 files_settings.get(
                     "deny_globs",

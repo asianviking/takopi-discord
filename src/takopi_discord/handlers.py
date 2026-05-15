@@ -869,7 +869,6 @@ def register_slash_commands(
         from takopi.context import RunContext
 
         from .file_transfer import (
-            MAX_FILE_SIZE,
             ZipTooLargeError,
             default_upload_name,
             deny_reason,
@@ -1005,11 +1004,11 @@ def register_slash_commands(
                                 project_root,
                                 rel_path,
                                 deny_globs,
-                                max_bytes=MAX_FILE_SIZE,
+                                max_bytes=files.max_download_bytes,
                             )
                         except ZipTooLargeError:
                             await ctx.followup.send(
-                                f"Directory too large to zip (>{format_bytes(MAX_FILE_SIZE)}).",
+                                f"Directory too large to zip (>{format_bytes(files.max_download_bytes)}).",
                                 ephemeral=True,
                             )
                             return
@@ -1026,9 +1025,9 @@ def register_slash_commands(
                     else:
                         # Send file directly
                         size = target.stat().st_size
-                        if size > MAX_FILE_SIZE:
+                        if size > files.max_download_bytes:
                             await ctx.followup.send(
-                                f"File too large ({format_bytes(size)} > {format_bytes(MAX_FILE_SIZE)}).",
+                                f"File too large ({format_bytes(size)} > {format_bytes(files.max_download_bytes)}).",
                                 ephemeral=True,
                             )
                             return

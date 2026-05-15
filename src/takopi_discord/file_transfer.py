@@ -32,9 +32,6 @@ __all__ = [
     "zip_directory",
 ]
 
-# Discord attachment size limit (25MB for non-nitro servers)
-MAX_FILE_SIZE = 25 * 1024 * 1024
-
 # Default deny patterns
 DEFAULT_DENY_GLOBS = (".git/**", "*.env", ".env.*", "**/.env", "**/credentials*")
 

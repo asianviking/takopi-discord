@@ -44,6 +44,7 @@ async def dispatch_command(
     message_id: int,
     guild_id: int | None,
     thread_id: int | None,
+    sender_id: int | None = None,
     reply_ref: MessageRef | None,
     reply_text: str | None,
     running_tasks: RunningTasks,
@@ -76,6 +77,7 @@ async def dispatch_command(
         channel_id=channel_id,
         message_id=message_id,
         thread_id=thread_id,
+        sender_id=sender_id,
     )
 
     try:

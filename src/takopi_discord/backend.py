@@ -48,6 +48,8 @@ def _build_startup_message(
     runtime: TransportRuntime,
     *,
     startup_pwd: str,
+    session_mode: str,
+    show_resume_line: bool,
 ) -> str:
     """Build the startup message displayed when bot connects."""
     available_engines = list(runtime.available_engine_ids())
@@ -70,11 +72,14 @@ def _build_startup_message(
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
     project_list = ", ".join(project_aliases) if project_aliases else "none"
 
+    resume_label = "shown" if show_resume_line else "hidden"
     return (
         f"\N{OCTOPUS} **takopi-discord is ready**\n\n"
         f"default: `{runtime.default_engine}`  \n"
         f"agents: `{engine_list}`  \n"
         f"projects: `{project_list}`  \n"
+        f"mode: `{session_mode}`  \n"
+        f"resume lines: `{resume_label}`  \n"
         f"working in: `{startup_pwd}`"
     )
 
@@ -202,6 +207,8 @@ class DiscordBackend(TransportBackend):
         startup_msg = _build_startup_message(
             runtime,
             startup_pwd=os.getcwd(),
+            session_mode=session_mode,
+            show_resume_line=show_resume_line,
         )
 
         bot = DiscordBotClient(token, guild_id=guild_id)

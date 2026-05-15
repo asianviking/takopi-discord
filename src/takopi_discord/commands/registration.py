@@ -8,10 +8,11 @@ from typing import TYPE_CHECKING
 import discord
 
 from takopi.commands import get_command, list_command_ids
+from takopi.ids import RESERVED_CHAT_COMMANDS
 from takopi.logging import get_logger
 from takopi.model import EngineId, ResumeToken
 from takopi.runner_bridge import RunningTasks
-from takopi.runners.run_options import EngineRunOptions
+from takopi_discord._run_options_compat import EngineRunOptions
 
 from .dispatch import dispatch_command
 from ..allowlist import is_user_allowed
@@ -67,7 +68,9 @@ def register_plugin_commands(
     """
     pycord_bot = bot.bot
 
-    for command_id in sorted(command_ids):
+    # Prevent plugin commands from colliding with built-in chat commands
+    effective_ids = command_ids - RESERVED_CHAT_COMMANDS
+    for command_id in sorted(effective_ids):
         backend = get_command(
             command_id, allowlist=cfg.runtime.allowlist, required=False
         )

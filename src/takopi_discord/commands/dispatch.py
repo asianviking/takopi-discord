@@ -13,7 +13,7 @@ from takopi.config import ConfigError
 from takopi.logging import get_logger
 from takopi.model import EngineId, ResumeToken
 from takopi.runner_bridge import RunningTasks
-from takopi.runners.run_options import EngineRunOptions
+from takopi_discord._run_options_compat import EngineRunOptions
 from takopi.transport import MessageRef
 
 from .executor import _DiscordCommandExecutor

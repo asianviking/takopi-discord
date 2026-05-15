@@ -20,7 +20,7 @@ from takopi.model import ResumeToken
 from takopi.progress import ProgressTracker
 from takopi.runner_bridge import RunningTasks
 from takopi.scheduler import ThreadJob, ThreadScheduler
-from takopi.runners.run_options import EngineRunOptions, apply_run_options
+from takopi_discord._run_options_compat import EngineRunOptions, apply_run_options
 from takopi.transport import MessageRef, RenderedMessage, SendOptions
 
 from .allowlist import is_user_allowed
@@ -176,7 +176,7 @@ async def _send_queued_progress(
     )
     message = RenderedMessage(
         text=queued.text,
-        extra={**queued.extra, "show_cancel": False},
+        extra={**queued.extra, "show_cancel": True},
     )
     reply_ref = MessageRef(
         channel_id=channel_id,
@@ -188,6 +188,51 @@ async def _send_queued_progress(
         message=message,
         options=SendOptions(reply_to=reply_ref, notify=False, thread_id=thread_id),
     )
+
+
+async def _handle_cancel_interaction(
+    interaction: discord.Interaction,
+    cfg: DiscordBridgeConfig,
+    scheduler: ThreadScheduler | None,
+    cancel_task: Callable[[int], Awaitable[None]],
+) -> None:
+    """Handle a cancel button interaction, preferring queued-job cancellation."""
+    user_id = getattr(getattr(interaction, "user", None), "id", None)
+    if not isinstance(user_id, int):
+        user_id = None
+    if not is_user_allowed(cfg.allowed_user_ids, user_id):
+        await interaction.response.defer()
+        return
+
+    channel_id = interaction.channel_id
+    cancelled = False
+    if (
+        scheduler is not None
+        and interaction.message is not None
+        and channel_id is not None
+    ):
+        job = await scheduler.cancel_queued(channel_id, interaction.message.id)
+        if job is not None:
+            cancelled = True
+            tracker = ProgressTracker(engine=job.resume_token.engine)
+            tracker.set_resume(job.resume_token)
+            context_line = cfg.runtime.format_context_line(job.context)
+            tracker_state = tracker.snapshot(context_line=context_line)
+            cancelled_msg = cfg.exec_cfg.presenter.render_progress(
+                tracker_state,
+                elapsed_s=0.0,
+                label="`cancelled`",
+            )
+            await cfg.exec_cfg.transport.edit(
+                ref=MessageRef(
+                    channel_id=channel_id,
+                    message_id=interaction.message.id,
+                ),
+                message=cancelled_msg,
+            )
+    if not cancelled and channel_id is not None:
+        await cancel_task(channel_id)
+    await interaction.response.defer()
 
 
 async def send_with_resume(
@@ -1073,7 +1118,7 @@ async def run_main_loop(
                 filename=attachment.filename,
                 transcript_length=len(transcript),
             )
-            prompt = transcript
+            prompt = f"(voice transcribed) {transcript}"
             attachments_for_files = non_audio_attachments
 
         # Allow empty prompt if @branch was used or if there are attachments (for auto_put)
@@ -1565,17 +1610,12 @@ async def run_main_loop(
             if interaction.data:
                 custom_id = interaction.data.get("custom_id")
                 if custom_id == CANCEL_BUTTON_ID:
-                    user_id = getattr(getattr(interaction, "user", None), "id", None)
-                    if not isinstance(user_id, int):
-                        user_id = None
-                    if not is_user_allowed(cfg.allowed_user_ids, user_id):
-                        await interaction.response.defer()
-                        return
-                    # Get the channel where the cancel was clicked
-                    channel_id = interaction.channel_id
-                    if channel_id is not None:
-                        await cancel_task(channel_id)
-                    await interaction.response.defer()
+                    await _handle_cancel_interaction(
+                        interaction,
+                        cfg,
+                        scheduler,
+                        cancel_task,
+                    )
             return
 
         # For application commands, let Pycord handle them

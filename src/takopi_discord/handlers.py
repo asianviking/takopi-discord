@@ -1347,7 +1347,7 @@ async def _handle_engine_command(
     from takopi.context import RunContext
     from takopi.logging import get_logger
     from takopi.model import ResumeToken
-    from takopi.runners.run_options import EngineRunOptions
+    from takopi_discord._run_options_compat import EngineRunOptions
     from takopi.transport import MessageRef
 
     from .commands.executor import _run_engine

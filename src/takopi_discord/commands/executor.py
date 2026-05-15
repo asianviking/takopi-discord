@@ -17,7 +17,7 @@ from takopi.runner import Runner
 from takopi.runner_bridge import ExecBridgeConfig, RunningTasks
 from takopi.runner_bridge import IncomingMessage as RunnerIncomingMessage
 from takopi.runner_bridge import handle_message
-from takopi.runners.run_options import EngineRunOptions, apply_run_options
+from takopi_discord._run_options_compat import EngineRunOptions, apply_run_options
 from takopi.transport import MessageRef, RenderedMessage, SendOptions
 from takopi.transport_runtime import TransportRuntime
 from takopi.utils.paths import reset_run_base_dir, set_run_base_dir

@@ -131,6 +131,7 @@ class DiscordFilesSettings:
     auto_put_mode: Literal["upload", "prompt"] = "upload"
     uploads_dir: str = "incoming"
     max_upload_bytes: int = 20 * 1024 * 1024  # 20MB
+    max_download_bytes: int = 50 * 1024 * 1024  # 50MB
     deny_globs: tuple[str, ...] = (
         ".git/**",
         ".env",

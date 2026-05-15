@@ -105,6 +105,7 @@ class TestDiscordFilesSettings:
         assert settings.auto_put_mode == "upload"
         assert settings.uploads_dir == "incoming"
         assert settings.max_upload_bytes == 20 * 1024 * 1024
+        assert settings.max_download_bytes == 50 * 1024 * 1024
 
     def test_custom_values(self) -> None:
         settings = DiscordFilesSettings(enabled=True, auto_put_mode="prompt")

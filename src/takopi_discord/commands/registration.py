@@ -198,6 +198,7 @@ async def _handle_plugin_command(
             message_id=message_id,
             guild_id=guild_id,
             thread_id=thread_id,
+            sender_id=author_id,
             reply_ref=None,  # Slash commands don't have a message to reply to
             reply_text=None,
             running_tasks=running_tasks,

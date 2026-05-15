@@ -73,6 +73,23 @@ def _diff_keys(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
     return sorted(key for key in keys if old.get(key) != new.get(key))
 
 
+def _is_message_author_allowed(
+    *,
+    allowed_user_ids: frozenset[int] | None,
+    allowed_bot_user_ids: frozenset[int] | None,
+    author_id: int | None,
+    author_is_bot: bool,
+) -> bool:
+    if (
+        author_is_bot
+        and author_id is not None
+        and allowed_bot_user_ids is not None
+        and author_id in allowed_bot_user_ids
+    ):
+        return True
+    return is_user_allowed(allowed_user_ids, author_id)
+
+
 async def _save_session_token(
     *,
     state_store: DiscordStateStore | None,
@@ -873,7 +890,12 @@ async def run_main_loop(
             )
             return
 
-        if not should_process_message(message, cfg.bot.user, require_mention=False):
+        if not should_process_message(
+            message,
+            cfg.bot.user,
+            require_mention=False,
+            allowed_bot_user_ids=cfg.allowed_bot_user_ids,
+        ):
             logger.debug(
                 "message.skipped", reason="should_process_message returned False"
             )
@@ -882,7 +904,12 @@ async def run_main_loop(
         author_id = getattr(message.author, "id", None)
         if not isinstance(author_id, int):
             author_id = None
-        if not is_user_allowed(cfg.allowed_user_ids, author_id):
+        if not _is_message_author_allowed(
+            allowed_user_ids=cfg.allowed_user_ids,
+            allowed_bot_user_ids=cfg.allowed_bot_user_ids,
+            author_id=author_id,
+            author_is_bot=bool(getattr(message.author, "bot", False)),
+        ):
             logger.debug(
                 "message.skipped",
                 reason="not in allowed_user_ids",

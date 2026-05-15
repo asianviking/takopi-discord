@@ -54,7 +54,8 @@ message_overflow = "split"       # "split" (default) or "trim" for long messages
 session_mode = "stateless"       # "stateless" (default) or "chat"
 show_resume_line = true          # Show resume token in messages (default: true)
 trigger_mode_default = "all"     # "all" (default) or "mentions" for inherited trigger mode
-# allowed_user_ids = [123456789012345678]  # Optional: restrict bot usage (Discord user IDs)
+# allowed_user_ids = [123456789012345678]      # Optional: restrict human bot usage (Discord user IDs)
+# allowed_bot_user_ids = [987654321098765432]  # Optional: trusted bot senders allowed to trigger Takopi
 media_group_debounce_s = 0.75     # Buffer bursts of attachments (seconds)
 
 [transports.discord.files]

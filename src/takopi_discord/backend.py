@@ -138,6 +138,14 @@ class DiscordBackend(TransportBackend):
                 value=allowed_user_ids_raw,
             )
 
+        allowed_bot_user_ids_raw = settings.get("allowed_bot_user_ids")
+        allowed_bot_user_ids = normalize_user_id_set(allowed_bot_user_ids_raw)
+        if allowed_bot_user_ids_raw and allowed_bot_user_ids is None:
+            logger.warning(
+                "config.invalid_allowed_bot_user_ids",
+                value=allowed_bot_user_ids_raw,
+            )
+
         media_group_debounce_s_raw = settings.get("media_group_debounce_s", 0.75)
         try:
             media_group_debounce_s = float(media_group_debounce_s_raw)
@@ -206,6 +214,7 @@ class DiscordBackend(TransportBackend):
             runtime=runtime,
             guild_id=guild_id,
             allowed_user_ids=allowed_user_ids,
+            allowed_bot_user_ids=allowed_bot_user_ids,
             startup_msg=startup_msg,
             exec_cfg=exec_cfg,
             session_mode=session_mode,

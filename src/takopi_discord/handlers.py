@@ -1580,7 +1580,9 @@ def should_process_message(
     # Ignore bot messages unless the sender is explicitly allowlisted.
     if message.author.bot:
         author_id = getattr(message.author, "id", None)
-        if not isinstance(author_id, int) or author_id not in (allowed_bot_user_ids or frozenset()):
+        if not isinstance(author_id, int) or author_id not in (
+            allowed_bot_user_ids or frozenset()
+        ):
             return False
 
     # Ignore empty messages (but allow if there are attachments for auto_put)

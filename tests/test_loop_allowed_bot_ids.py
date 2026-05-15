@@ -118,17 +118,29 @@ async def test_run_main_loop_passes_allowed_bot_user_ids_to_message_gate(
     )
     bot = _DummyBotClient(message)
 
-    monkeypatch.setattr(loop_module, "DiscordStateStore", lambda _path: _DummyStateStore())
-    monkeypatch.setattr(loop_module, "DiscordPrefsStore", lambda _path: _DummyPrefsStore())
-    monkeypatch.setattr(loop_module, "register_slash_commands", lambda *args, **kwargs: None)
-    monkeypatch.setattr(loop_module, "register_engine_commands", lambda *args, **kwargs: set())
+    monkeypatch.setattr(
+        loop_module, "DiscordStateStore", lambda _path: _DummyStateStore()
+    )
+    monkeypatch.setattr(
+        loop_module, "DiscordPrefsStore", lambda _path: _DummyPrefsStore()
+    )
+    monkeypatch.setattr(
+        loop_module, "register_slash_commands", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        loop_module, "register_engine_commands", lambda *args, **kwargs: set()
+    )
     monkeypatch.setattr(loop_module, "discover_command_ids", lambda _allowlist: set())
 
-    def fake_should_process_message(message, bot_user, *, require_mention=False, allowed_bot_user_ids=None):
+    def fake_should_process_message(
+        message, bot_user, *, require_mention=False, allowed_bot_user_ids=None
+    ):
         captured["allowed_bot_user_ids"] = allowed_bot_user_ids
         return False
 
-    monkeypatch.setattr(loop_module, "should_process_message", fake_should_process_message)
+    monkeypatch.setattr(
+        loop_module, "should_process_message", fake_should_process_message
+    )
 
     cfg = DiscordBridgeConfig(
         bot=bot,

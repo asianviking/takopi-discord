@@ -1,0 +1,22 @@
+{
+  "name": "takopi-discord-automation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "upstream:takopi": "flue run upstream-takopi"
+  },
+  "dependencies": {
+    "@flue/runtime": "0.6.2",
+    "@octokit/core": "7.0.6",
+    "valibot": "1.2.0"
+  },
+  "devDependencies": {
+    "@flue/cli": "0.6.2",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

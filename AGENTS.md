@@ -5,6 +5,10 @@
 When adapting upstream Takopi or Telegram transport behavior to takopi-discord,
 map concepts before porting UI.
 
+Track capability parity in `docs/transport-parity.md`. `AGENTS.md` should stay
+as the short conceptual guide; the parity doc is the living ledger for status,
+intentional UX differences, and follow-up work.
+
 Core Takopi concepts:
 - Project: configured repo/workspace alias.
 - Branch: git branch/worktree context.

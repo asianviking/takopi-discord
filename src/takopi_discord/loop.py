@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Hashable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,6 +60,30 @@ __all__ = ["run_main_loop"]
 
 _SEEN_MESSAGES_LIMIT = 2048
 _SEEN_INTERACTIONS_LIMIT = 4096
+
+
+def _annotate_voice_prompt(prompt: str) -> str:
+    return f"(voice transcribed) {prompt}".strip()
+
+
+class _BoundedDeduper:
+    """Bounded insertion-order deduper for Discord retry deliveries."""
+
+    def __init__(self, *, limit: int) -> None:
+        self._limit = limit
+        self._seen: set[Hashable] = set()
+        self._order: deque[Hashable] = deque()
+
+    def add(self, key: Hashable) -> bool:
+        """Return True when key is new, False when it was already seen."""
+        if key in self._seen:
+            return False
+        self._seen.add(key)
+        self._order.append(key)
+        while len(self._order) > self._limit:
+            oldest = self._order.popleft()
+            self._seen.discard(oldest)
+        return True
 
 
 async def _send_startup(cfg: DiscordBridgeConfig, channel_id: int) -> None:
@@ -165,6 +189,57 @@ async def _send_plain_reply(
     )
 
 
+def _render_resume_progress(
+    cfg: DiscordBridgeConfig,
+    *,
+    resume_token: ResumeToken,
+    context: RunContext | None,
+    label: str,
+) -> RenderedMessage:
+    tracker = ProgressTracker(engine=resume_token.engine)
+    tracker.set_resume(resume_token)
+    context_line = cfg.runtime.format_context_line(context)
+    resume_formatter = None
+    if cfg.show_resume_line or cfg.session_mode != "chat":
+        resume_formatter = cfg.runtime.resolve_runner(
+            resume_token=resume_token,
+            engine_override=None,
+        ).runner.format_resume
+    state = tracker.snapshot(
+        resume_formatter=resume_formatter,
+        context_line=context_line,
+    )
+    return cfg.exec_cfg.presenter.render_progress(
+        state,
+        elapsed_s=0.0,
+        label=label,
+    )
+
+
+async def _edit_queued_progress(
+    cfg: DiscordBridgeConfig,
+    *,
+    channel_id: int,
+    message_id: int,
+    job: ThreadJob,
+    label: str,
+) -> None:
+    rendered = _render_resume_progress(
+        cfg,
+        resume_token=job.resume_token,
+        context=job.context,
+        label=label,
+    )
+    await cfg.exec_cfg.transport.edit(
+        ref=MessageRef(
+            channel_id=channel_id,
+            message_id=message_id,
+            thread_id=cast(int | None, job.thread_id),
+        ),
+        message=rendered,
+    )
+
+
 async def _send_queued_progress(
     cfg: DiscordBridgeConfig,
     *,
@@ -173,19 +248,13 @@ async def _send_queued_progress(
     thread_id: int | None,
     resume_token: ResumeToken,
     context: RunContext | None,
+    steerable: bool,
 ) -> MessageRef | None:
-    tracker = ProgressTracker(engine=resume_token.engine)
-    tracker.set_resume(resume_token)
-    context_line = cfg.runtime.format_context_line(context)
-    state = tracker.snapshot(context_line=context_line)
-    queued = cfg.exec_cfg.presenter.render_progress(
-        state,
-        elapsed_s=0.0,
-        label="queued",
-    )
-    message = RenderedMessage(
-        text=queued.text,
-        extra=queued.extra,
+    message = _render_resume_progress(
+        cfg,
+        resume_token=resume_token,
+        context=context,
+        label="queued" if steerable else "starting",
     )
     reply_ref = MessageRef(
         channel_id=channel_id,
@@ -238,6 +307,7 @@ async def send_with_resume(
         thread_id=thread_id,
         resume_token=resume,
         context=running_task.context,
+        steerable=not running_task.done.is_set(),
     )
     await enqueue(
         channel_id,
@@ -460,11 +530,8 @@ async def run_main_loop(
     resume_resolver: ResumeResolver | None = None
     media_buffer: MediaGroupBuffer | None = None
 
-    # Deduplication state for messages and interactions
-    seen_message_keys: set[tuple[int, int]] = set()
-    seen_messages_order: deque[tuple[int, int]] = deque()
-    seen_interaction_ids: set[int] = set()
-    seen_interactions_order: deque[int] = deque()
+    message_deduper = _BoundedDeduper(limit=_SEEN_MESSAGES_LIMIT)
+    interaction_deduper = _BoundedDeduper(limit=_SEEN_INTERACTIONS_LIMIT)
 
     # Initialize voice manager if OpenAI API key is available (needed for TTS)
     # STT uses local Whisper via pywhispercpp
@@ -529,6 +596,13 @@ async def run_main_loop(
         if message_id is not None and scheduler is not None:
             job = await scheduler.cancel_queued(channel_id, message_id)
             if job is not None:
+                await _edit_queued_progress(
+                    cfg,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    job=job,
+                    label="cancelled",
+                )
                 logger.info(
                     "cancel.queued",
                     channel_id=channel_id,
@@ -902,7 +976,7 @@ async def run_main_loop(
         message_id = getattr(message, "id", None)
         if message.guild is not None and isinstance(message_id, int):
             key = (message.guild.id, message_id)
-            if key in seen_message_keys:
+            if not message_deduper.add(key):
                 logger.debug(
                     "message.ignored",
                     reason="duplicate_message",
@@ -910,11 +984,6 @@ async def run_main_loop(
                     message_id=message_id,
                 )
                 return
-            seen_message_keys.add(key)
-            seen_messages_order.append(key)
-            if len(seen_messages_order) > _SEEN_MESSAGES_LIMIT:
-                oldest = seen_messages_order.popleft()
-                seen_message_keys.discard(oldest)
 
         logger.debug(
             "message.raw",
@@ -1123,7 +1192,10 @@ async def run_main_loop(
                 transcript_length=len(transcript),
             )
             prompt = transcript
+            is_voice_transcribed = True
             attachments_for_files = non_audio_attachments
+        else:
+            is_voice_transcribed = False
 
         # Allow empty prompt if @branch was used or if there are attachments (for auto_put)
         has_attachments = bool(message.attachments)
@@ -1322,6 +1394,13 @@ async def run_main_loop(
                 engine_id=engine_id,
                 source="reply" if reply_text else "message",
             )
+        if is_voice_transcribed:
+            resolved_prompt = (
+                resolved_msg.prompt
+                if resolved_msg is not None and resolved_msg.prompt.strip()
+                else prompt
+            )
+            prompt = _annotate_voice_prompt(resolved_prompt)
 
         if (
             resume_token is None
@@ -1548,6 +1627,7 @@ async def run_main_loop(
             resume_token = decision.resume_token
 
         if resume_token is not None and scheduler is not None:
+            steerable = await scheduler.is_busy(resume_token)
             progress_ref = await _send_queued_progress(
                 cfg,
                 channel_id=job_channel_id,
@@ -1555,6 +1635,7 @@ async def run_main_loop(
                 thread_id=thread_id,
                 resume_token=resume_token,
                 context=run_context,
+                steerable=steerable,
             )
             await scheduler.enqueue_resume(
                 job_channel_id,
@@ -1610,19 +1691,13 @@ async def run_main_loop(
     @cfg.bot.bot.event
     async def on_interaction(interaction: discord.Interaction) -> None:
         # Deduplicate interactions (Discord can redeliver on retries)
-        if interaction.id is not None:
-            if interaction.id in seen_interaction_ids:
-                logger.debug(
-                    "interaction.ignored",
-                    reason="duplicate_interaction",
-                    interaction_id=interaction.id,
-                )
-                return
-            seen_interaction_ids.add(interaction.id)
-            seen_interactions_order.append(interaction.id)
-            if len(seen_interactions_order) > _SEEN_INTERACTIONS_LIMIT:
-                oldest = seen_interactions_order.popleft()
-                seen_interaction_ids.discard(oldest)
+        if interaction.id is not None and not interaction_deduper.add(interaction.id):
+            logger.debug(
+                "interaction.ignored",
+                reason="duplicate_interaction",
+                interaction_id=interaction.id,
+            )
+            return
 
         # Handle component interactions (buttons)
         if interaction.type == discord.InteractionType.component:
@@ -1688,32 +1763,12 @@ async def run_main_loop(
                             )
                             await interaction.response.defer()
                             return
-                        # Edit progress message to show steered label
-                        tracker = ProgressTracker(engine=job.resume_token.engine)
-                        tracker.set_resume(job.resume_token)
-                        context_line = cfg.runtime.format_context_line(job.context)
-                        resume_formatter = None
-                        if cfg.show_resume_line or cfg.session_mode != "chat":
-                            resume_formatter = cfg.runtime.resolve_runner(
-                                resume_token=job.resume_token,
-                                engine_override=None,
-                            ).runner.format_resume
-                        state = tracker.snapshot(
-                            resume_formatter=resume_formatter,
-                            context_line=context_line,
-                        )
-                        steered = cfg.exec_cfg.presenter.render_progress(
-                            state,
-                            elapsed_s=0.0,
+                        await _edit_queued_progress(
+                            cfg,
+                            channel_id=channel_id,
+                            message_id=message_id,
+                            job=claimed,
                             label="steered",
-                        )
-                        await cfg.exec_cfg.transport.edit(
-                            ref=MessageRef(
-                                channel_id=channel_id,
-                                message_id=message_id,
-                                thread_id=job.thread_id,
-                            ),
-                            message=steered,
                         )
                         await interaction.response.defer()
                         return
@@ -1817,7 +1872,7 @@ async def run_main_loop(
                 await run_job(
                     channel_id=text_channel_id,
                     user_msg_id=voice_msg_id,
-                    text=transcript,
+                    text=_annotate_voice_prompt(transcript),
                     resume_token=resume_token,
                     context=run_context,
                     engine_id=engine_id,

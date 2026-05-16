@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from takopi_discord.loop import _annotate_voice_prompt
 import takopi_discord.voice_messages as voice_messages
 
 
@@ -30,6 +31,10 @@ def test_is_audio_attachment_rejects_unknown() -> None:
     attachment.content_type = "image/png"
     attachment.filename = "image.png"
     assert voice_messages.is_audio_attachment(attachment) is False
+
+
+def test_voice_prompt_annotation_marks_transcribed_text() -> None:
+    assert _annotate_voice_prompt("ship it") == "(voice transcribed) ship it"
 
 
 @dataclass(frozen=True, slots=True)

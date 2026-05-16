@@ -169,8 +169,13 @@ This creates a new thread bound to the specified branch. Without a prefix, threa
 - Messages in channels automatically create threads
 - Each thread maintains its own session with resume tokens
 - Multiple sessions can run simultaneously across threads
-- Cancel button appears on progress messages for task cancellation
+- Progress messages include Discord buttons for cancellation, and queued replies
+  can be steered into an active turn when the runner supports it
 - Rate limiting prevents Discord API throttling during high activity
+
+Discord uses native threads for the same project/branch workflow that Telegram
+uses forum topics for. Start with `@branch-name` to create a branch-bound
+thread, or use `/ctx set` inside an existing thread to rebind it.
 
 ### Trigger Modes
 

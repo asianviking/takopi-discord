@@ -19,7 +19,7 @@ the same Takopi capability through native-feeling Discord UX.
 | Takopi capability scope | Telegram UX | Discord UX mapping | Notes |
 | --- | --- | --- | --- |
 | Project | Forum topic can carry project/worktree context | Bound text channel | Project-level defaults, onboarding, and bindings should usually live at channel scope. |
-| Branch/work item | Forum topic can also carry branch/session scope | Auto-created thread inside a bound channel | A message in a bound channel usually starts a new thread/work item. |
+| Branch/work item | Forum topic can also carry branch/session scope | Auto-created thread inside a bound channel | A message in a bound channel usually starts a new thread/work item on the channel's base branch. |
 | Session continuation | Continue in the same topic | Continue in the same thread | Thread sessions keep resume tokens and active-turn context. |
 | Per-scope preferences | Topic/chat-level settings | Thread override, then channel override, then config default | Preserve the cascade so thread-specific work can override project defaults. |
 
@@ -30,7 +30,7 @@ the same Takopi capability through native-feeling Discord UX.
 | Project binding | Bind a topic/chat to a project | `/bind` binds the current Discord channel to a project alias | Done | Channel is the project container; see README "Core Commands". |
 | Project context display/editing | Show or change topic context | `/ctx show/set/clear` works in channels and threads | Done | Thread context can override channel context for branch-specific work. |
 | New work item | Start or use a topic for a branch/task | Send a message in a bound project channel; the bot creates a thread | Done | Discord-specific UX. Do not replace with literal topic creation. |
-| Branch targeting | Topic or command-level branch context | Prefix a channel message with `@branch-name`, or use `/ctx set` in a thread | Done | The new thread is bound to that branch. |
+| Branch targeting | Topic or command-level branch context | Prefix a channel message with `@branch-name`, or use `/ctx set @branch-name` in a thread | Done | Thread-level `/ctx set` is branch-only, prepares/reuses the Takopi worktree, and renames the Discord thread to the branch. |
 | Session continuation | Continue in the same topic | Continue in the same Discord thread | Done | Resume tokens are keyed by thread when present. |
 | Clear conversation | `/new` or equivalent reset | `/new` clears the channel/thread session | Done | Applies to current Discord scope. |
 | Cancel active task | Telegram cancel action/command | `/cancel` and Discord cancel controls | Done | Keep Discord buttons when they fit the surface. |

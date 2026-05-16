@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from takopi.context import RunContext
 
 from takopi_discord.types import DiscordChannelContext, DiscordThreadContext
 
@@ -19,12 +21,18 @@ class DummyThread:
 class FakeRuntime:
     def __init__(self, projects: dict[str, str]) -> None:
         self.projects = projects
+        self.resolved_contexts: list[RunContext] = []
 
     def normalize_project_key(self, value: str) -> str | None:
         return self.projects.get(value.strip().lower())
 
     def project_aliases(self) -> tuple[str, ...]:
         return tuple(self.projects)
+
+    def resolve_run_cwd(self, context: RunContext) -> Path:
+        self.resolved_contexts.append(context)
+        branch = context.branch or "main"
+        return Path("/repo/.worktrees") / branch
 
 
 @pytest.mark.anyio
@@ -183,6 +191,101 @@ async def test_ctx_set_in_thread_rebinds_branch(
             default_engine="claude",
         ),
     )
+
+
+@pytest.mark.anyio
+async def test_ctx_set_in_thread_prepares_worktree_and_renames_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import takopi_discord.handlers as handlers
+
+    monkeypatch.setattr(handlers.discord, "Thread", DummyThread)
+    monkeypatch.setattr(handlers, "_require_admin", AsyncMock(return_value=True))
+
+    ctx = MagicMock()
+    ctx.guild = MagicMock()
+    ctx.guild.id = 1
+    ctx.channel_id = 10
+    ctx.channel = DummyThread(parent_id=20)
+    ctx.channel.edit = AsyncMock()
+    ctx.respond = AsyncMock()
+
+    channel_ctx = DiscordChannelContext(
+        project="takopi-discord",
+        worktrees_dir=".worktrees",
+        default_engine="codex",
+        worktree_base="main",
+    )
+
+    async def get_context(_guild_id: int, channel_id: int):
+        if channel_id == 10:
+            return None
+        if channel_id == 20:
+            return channel_ctx
+        return None
+
+    state_store = MagicMock()
+    state_store.get_context = AsyncMock(side_effect=get_context)
+    state_store.set_context = AsyncMock()
+    runtime = FakeRuntime({"takopi-discord": "takopi-discord"})
+
+    await handlers._handle_ctx_command(
+        ctx,
+        action="set",
+        project=None,
+        branch="@feature/new",
+        state_store=state_store,
+        runtime=runtime,
+    )
+
+    assert runtime.resolved_contexts == [
+        RunContext(project="takopi-discord", branch="feature/new")
+    ]
+    ctx.channel.edit.assert_awaited_once_with(name="feature/new")
+    args, kwargs = ctx.respond.call_args
+    content = args[0] if args else kwargs["content"]
+    assert "Worktree" in content
+    assert "feature/new" in content
+    assert "Thread name" in content
+
+
+@pytest.mark.anyio
+async def test_ctx_set_in_thread_rejects_project_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import takopi_discord.handlers as handlers
+
+    monkeypatch.setattr(handlers.discord, "Thread", DummyThread)
+    monkeypatch.setattr(handlers, "_require_admin", AsyncMock(return_value=True))
+
+    ctx = MagicMock()
+    ctx.guild = MagicMock()
+    ctx.guild.id = 1
+    ctx.channel_id = 10
+    ctx.channel = DummyThread(parent_id=20)
+    ctx.channel.edit = AsyncMock()
+    ctx.respond = AsyncMock()
+
+    state_store = MagicMock()
+    state_store.get_context = AsyncMock(
+        return_value=DiscordChannelContext(project="takopi-discord")
+    )
+    state_store.set_context = AsyncMock()
+
+    await handlers._handle_ctx_command(
+        ctx,
+        action="set",
+        project="other",
+        branch="@feature/new",
+        state_store=state_store,
+        runtime=FakeRuntime({"other": "other"}),
+    )
+
+    state_store.set_context.assert_not_awaited()
+    ctx.channel.edit.assert_not_awaited()
+    args, kwargs = ctx.respond.call_args
+    content = args[0] if args else kwargs["content"]
+    assert "only supports rebinding the branch" in content
 
 
 @pytest.mark.anyio

@@ -93,6 +93,9 @@ async def _handle_ctx_command(
     runtime: TransportRuntime | None = None,
 ) -> None:
     """Handle /ctx show|clear|set for channel/thread context."""
+    from takopi.config import ConfigError
+    from takopi.context import RunContext
+
     from .types import DiscordChannelContext, DiscordThreadContext
 
     if ctx.guild is None:
@@ -170,13 +173,42 @@ async def _handle_ctx_command(
                 worktrees_dir=base.worktrees_dir,
                 default_engine=base.default_engine,
             )
+            worktree_path: str | None = None
+            if runtime is not None:
+                try:
+                    cwd = runtime.resolve_run_cwd(
+                        RunContext(
+                            project=new_thread_context.project,
+                            branch=new_thread_context.branch,
+                        )
+                    )
+                except ConfigError as exc:
+                    await ctx.respond(
+                        "Could not prepare branch worktree.\n"
+                        f"- Branch: `{new_thread_context.branch}`\n"
+                        f"- Error: {exc}",
+                        ephemeral=True,
+                    )
+                    return
+                if cwd is not None:
+                    worktree_path = str(cwd)
+
             await state_store.set_context(guild_id, thread_id, new_thread_context)
-            await ctx.respond(
-                "Thread context updated.\n"
-                f"- Project: `{new_thread_context.project}`\n"
-                f"- Branch: `{new_thread_context.branch}`",
-                ephemeral=True,
+            rename_attempted, rename_error = await _rename_thread_to_branch(
+                ctx.channel, new_thread_context.branch
             )
+            lines = [
+                "Thread context updated.",
+                f"- Project: `{new_thread_context.project}`",
+                f"- Branch: `{new_thread_context.branch}`",
+            ]
+            if worktree_path is not None:
+                lines.append(f"- Worktree: `{worktree_path}`")
+            if rename_attempted and rename_error is None:
+                lines.append(f"- Thread name: `{new_thread_context.branch}`")
+            elif rename_error is not None:
+                lines.append(f"- Thread name update failed: {rename_error}")
+            await ctx.respond("\n".join(lines), ephemeral=True)
             return
 
         # Channel update.
@@ -285,6 +317,25 @@ async def _handle_ctx_command(
             lines.append("- Thread: _none_")
 
     await ctx.respond("\n".join(lines), ephemeral=True)
+
+
+async def _rename_thread_to_branch(
+    thread: object,
+    branch: str,
+) -> tuple[bool, str | None]:
+    """Rename a Discord thread to match its bound branch.
+
+    Returns (attempted, error). Some tests use light stand-ins that do not expose
+    edit(); production Discord thread objects do.
+    """
+    edit = getattr(thread, "edit", None)
+    if not callable(edit):
+        return False, None
+    try:
+        await edit(name=branch)
+    except discord.HTTPException as exc:
+        return True, str(exc)
+    return True, None
 
 
 def register_slash_commands(

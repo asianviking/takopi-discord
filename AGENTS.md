@@ -33,8 +33,12 @@ Guidance:
 - If upstream changes topic-scoped branch, session, continuation, or work-item
   behavior, first consider whether the Discord equivalent belongs in threads.
 - A new message in a bound Discord project channel should usually create a new
-  thread/work item.
+  thread/work item on the channel's base branch unless a branch is specified.
 - A message inside a Discord thread should continue that thread's
   branch/session context.
+- Thread-level `/ctx set` should only set the branch/worktree for that thread.
+  The project stays inherited from the bound parent channel.
+- When a thread is rebound to a branch, prepare or reuse the Takopi worktree and
+  rename the Discord thread to match the branch.
 - `/topic` parity usually means improving channel/project binding or onboarding,
   not adding a literal `/topic` command.

@@ -13,7 +13,11 @@ Maps Discord's structure to takopi's project/branch/session model:
 | Thread | Branch / Session | Feature branch or session on base branch |
 | Voice Channel | Voice Session | Talk to the agent with speech |
 
-When you message in a channel, a thread is created. Use `@branch-name` prefix to work on a specific branch, otherwise it creates a session on the base branch (e.g., `main`).
+When you message in a channel, a thread is created on the channel's base branch
+(e.g., `main`). Use `@branch-name` prefix to start on a specific branch, or use
+`/ctx set @branch-name` inside the thread later. Thread-level `/ctx set` keeps
+the channel's project binding, prepares or reuses the branch worktree, and
+renames the Discord thread to match the branch.
 
 Voice channels can be created with `/voice` and are linked to a thread's project/branch context. The bot joins, listens, and responds with speech.
 
@@ -111,7 +115,9 @@ State is automatically saved to `~/.takopi/discord_state.json`. Chat preferences
 - `/bind <project> [worktrees_dir] [default_engine] [worktree_base]` - Bind channel to a configured Takopi project alias/key
 - `/unbind` - Remove project binding
 - `/status` - Show current channel/thread context and status
-- `/ctx [show|set|clear]` - Show or modify context binding
+- `/ctx [show|set|clear]` - Show or modify context binding. In channels it can
+  set the project/base branch; in threads it only sets the branch for that
+  thread.
 - `/cancel` - Cancel running task
 - `/new` - Clear conversation session (start fresh)
 
@@ -163,7 +169,14 @@ Start a conversation on a specific branch by prefixing with `@branch-name`:
 @issue-123 fix the bug
 ```
 
-This creates a new thread bound to the specified branch. Without a prefix, threads work on the base branch (e.g., `main`).
+This creates a new thread bound to the specified branch. Without a prefix,
+threads start on the channel's base branch (e.g., `main`).
+
+Inside a thread, use `/ctx set @branch-name` to move that thread to a branch.
+The project is inherited from the parent channel, so thread-level `/ctx set`
+does not accept a project. Takopi prepares the branch worktree when the context
+is set, reusing an existing worktree/branch when one already exists, and the
+Discord thread name is updated to the branch name.
 
 ### Thread Sessions
 
@@ -176,7 +189,8 @@ This creates a new thread bound to the specified branch. Without a prefix, threa
 
 Discord uses native threads for the same project/branch workflow that Telegram
 uses forum topics for. Start with `@branch-name` to create a branch-bound
-thread, or use `/ctx set` inside an existing thread to rebind it.
+thread, or use `/ctx set @branch-name` inside an existing thread to bind it to a
+branch while keeping the parent channel's project.
 
 ### Trigger Modes
 

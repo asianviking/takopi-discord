@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
-from takopi_discord.bridge import (
-    DiscordPresenter,
-    CancelView,
-    SteerCancelView,
-    ClearView,
-)
+from takopi_discord.bridge import DiscordPresenter
 
 
 class _FakeFormatter:
@@ -26,18 +20,14 @@ class _FakeState:
 
 def test_presenter_queued_shows_steer_and_cancel() -> None:
     presenter = DiscordPresenter(formatter=_FakeFormatter())
-    rendered = presenter.render_progress(
-        _FakeState(), elapsed_s=0.0, label="queued"
-    )
+    rendered = presenter.render_progress(_FakeState(), elapsed_s=0.0, label="queued")
     assert rendered.extra["show_cancel"] is True
     assert rendered.extra["show_steer"] is True
 
 
 def test_presenter_working_shows_only_cancel() -> None:
     presenter = DiscordPresenter(formatter=_FakeFormatter())
-    rendered = presenter.render_progress(
-        _FakeState(), elapsed_s=0.0, label="working"
-    )
+    rendered = presenter.render_progress(_FakeState(), elapsed_s=0.0, label="working")
     assert rendered.extra["show_cancel"] is True
     assert rendered.extra["show_steer"] is False
 
@@ -53,9 +43,7 @@ def test_presenter_cancelled_shows_neither() -> None:
 
 def test_presenter_steered_shows_neither() -> None:
     presenter = DiscordPresenter(formatter=_FakeFormatter())
-    rendered = presenter.render_progress(
-        _FakeState(), elapsed_s=0.0, label="steered"
-    )
+    rendered = presenter.render_progress(_FakeState(), elapsed_s=0.0, label="steered")
     assert rendered.extra["show_cancel"] is False
     assert rendered.extra["show_steer"] is False
 

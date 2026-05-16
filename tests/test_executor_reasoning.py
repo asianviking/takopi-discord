@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from takopi_discord.commands.executor import _reasoning_warning
 from takopi.runners.run_options import EngineRunOptions
 

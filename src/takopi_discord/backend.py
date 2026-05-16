@@ -185,7 +185,7 @@ class DiscordBackend(TransportBackend):
             deny_globs=tuple(
                 files_settings.get(
                     "deny_globs",
-                    [".git/**", ".env", ".envrc", "**/*.pem", "**/.ssh/**"],
+                    DiscordFilesSettings().deny_globs,
                 )
             ),
             allowed_user_ids=files_allowed_user_ids,

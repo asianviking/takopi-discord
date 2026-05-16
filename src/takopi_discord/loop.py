@@ -25,7 +25,12 @@ from takopi.runners.run_options import EngineRunOptions, apply_run_options
 from takopi.transport import MessageRef, RenderedMessage, SendOptions
 
 from .allowlist import is_user_allowed
-from .bridge import CANCEL_BUTTON_ID, STEER_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
+from .bridge import (
+    CANCEL_BUTTON_ID,
+    STEER_BUTTON_ID,
+    DiscordBridgeConfig,
+    DiscordTransport,
+)
 from .commands import discover_command_ids, register_plugin_commands
 from .handlers import (
     extract_prompt_from_message,
@@ -451,7 +456,6 @@ async def run_main_loop(
     state_store = DiscordStateStore(cfg.runtime.config_path)
     prefs_store = DiscordPrefsStore(cfg.runtime.config_path)
     await prefs_store.ensure_loaded()
-    transport = cast(DiscordTransport, cfg.exec_cfg.transport)
     scheduler: ThreadScheduler | None = None
     resume_resolver: ResumeResolver | None = None
     media_buffer: MediaGroupBuffer | None = None
@@ -491,11 +495,16 @@ async def run_main_loop(
         whisper_model = os.environ.get(
             "WHISPER_MODEL", cfg.voice_messages.whisper_model
         )
-        voice_attachment_transcriber = WhisperAttachmentTranscriber(whisper_model)
+        voice_attachment_transcriber = WhisperAttachmentTranscriber(
+            whisper_model,
+            base_url=cfg.voice_messages.voice_transcription_base_url,
+            api_key=cfg.voice_messages.voice_transcription_api_key,
+        )
         logger.info(
             "voice_messages.enabled",
             whisper_model=whisper_model,
             max_bytes=cfg.voice_messages.max_bytes,
+            remote=cfg.voice_messages.voice_transcription_base_url is not None,
         )
 
     logger.info(
@@ -1644,7 +1653,11 @@ async def run_main_loop(
                         return
                     channel_id = interaction.channel_id
                     message_id = interaction.message.id if interaction.message else None
-                    if channel_id is not None and message_id is not None and scheduler is not None:
+                    if (
+                        channel_id is not None
+                        and message_id is not None
+                        and scheduler is not None
+                    ):
                         job = await scheduler.get_queued(channel_id, message_id)
                         if job is None:
                             await interaction.response.defer()
@@ -1664,7 +1677,7 @@ async def run_main_loop(
                             return
                         try:
                             await control.steer(claimed.text)
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001
                             await scheduler.requeue_front(claimed)
                             logger.warning(
                                 "steer.failed",

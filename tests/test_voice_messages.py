@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -72,3 +73,41 @@ async def test_transcriber_cleans_whisper_artifacts(
     assert text == "hello world"
     assert calls
     assert "ffmpeg" in calls[0][0]
+
+
+@pytest.mark.anyio
+async def test_transcriber_uses_remote_client_when_base_url_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyTranscriptions:
+        async def create(self, *, model: str, file):
+            captured["model"] = model
+            captured["filename"] = file[0]
+            captured["payload"] = file[1].read()
+            return SimpleNamespace(text=" hello from server ")
+
+    class DummyClient:
+        def __init__(self, *, api_key: str, base_url: str) -> None:
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+            self.audio = SimpleNamespace(transcriptions=DummyTranscriptions())
+
+    monkeypatch.setattr(voice_messages, "AsyncOpenAI", DummyClient)
+
+    transcriber = voice_messages.WhisperAttachmentTranscriber(
+        "whisper-large-v3",
+        base_url="http://localhost:8000/v1",
+        api_key="local-key",
+    )
+    text = await transcriber.transcribe_bytes(b"audio", suffix=".ogg")
+
+    assert text == "hello from server"
+    assert captured == {
+        "api_key": "local-key",
+        "base_url": "http://localhost:8000/v1",
+        "model": "whisper-large-v3",
+        "filename": "voice.ogg",
+        "payload": b"audio",
+    }

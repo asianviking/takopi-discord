@@ -121,3 +121,7 @@ class TestDiscordFilesSettings:
         assert ".git/**" in settings.deny_globs
         assert ".env" in settings.deny_globs
         assert ".envrc" in settings.deny_globs
+        assert "*.pem" in settings.deny_globs
+        assert ".ssh/**" in settings.deny_globs
+        assert deny_reason(Path("secret.pem"), settings.deny_globs) == "*.pem"
+        assert deny_reason(Path(".ssh/id_rsa"), settings.deny_globs) == ".ssh/**"

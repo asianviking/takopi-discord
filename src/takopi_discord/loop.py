@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,7 +25,7 @@ from takopi.runners.run_options import EngineRunOptions, apply_run_options
 from takopi.transport import MessageRef, RenderedMessage, SendOptions
 
 from .allowlist import is_user_allowed
-from .bridge import CANCEL_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
+from .bridge import CANCEL_BUTTON_ID, STEER_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
 from .commands import discover_command_ids, register_plugin_commands
 from .handlers import (
     extract_prompt_from_message,
@@ -51,6 +52,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["run_main_loop"]
+
+_SEEN_MESSAGES_LIMIT = 2048
+_SEEN_INTERACTIONS_LIMIT = 4096
 
 
 async def _send_startup(cfg: DiscordBridgeConfig, channel_id: int) -> None:
@@ -176,7 +180,7 @@ async def _send_queued_progress(
     )
     message = RenderedMessage(
         text=queued.text,
-        extra={**queued.extra, "show_cancel": False},
+        extra=queued.extra,
     )
     reply_ref = MessageRef(
         channel_id=channel_id,
@@ -447,10 +451,16 @@ async def run_main_loop(
     state_store = DiscordStateStore(cfg.runtime.config_path)
     prefs_store = DiscordPrefsStore(cfg.runtime.config_path)
     await prefs_store.ensure_loaded()
-    _ = cast(DiscordTransport, cfg.exec_cfg.transport)  # Used for type checking only
+    transport = cast(DiscordTransport, cfg.exec_cfg.transport)
     scheduler: ThreadScheduler | None = None
     resume_resolver: ResumeResolver | None = None
     media_buffer: MediaGroupBuffer | None = None
+
+    # Deduplication state for messages and interactions
+    seen_message_keys: set[tuple[int, int]] = set()
+    seen_messages_order: deque[tuple[int, int]] = deque()
+    seen_interaction_ids: set[int] = set()
+    seen_interactions_order: deque[int] = deque()
 
     # Initialize voice manager if OpenAI API key is available (needed for TTS)
     # STT uses local Whisper via pywhispercpp
@@ -504,8 +514,20 @@ async def run_main_loop(
                 return ref.message_id
         return None
 
-    async def cancel_task(channel_id: int) -> None:
-        """Cancel a running task in a channel."""
+    async def cancel_task(channel_id: int, *, message_id: int | None = None) -> None:
+        """Cancel a running or queued task in a channel."""
+        # Try to cancel a queued job first (via progress message id)
+        if message_id is not None and scheduler is not None:
+            job = await scheduler.cancel_queued(channel_id, message_id)
+            if job is not None:
+                logger.info(
+                    "cancel.queued",
+                    channel_id=channel_id,
+                    progress_message_id=message_id,
+                    resume=job.resume_token.value if job.resume_token else None,
+                )
+                return
+        # Fall back to cancelling a running task
         for ref, task in list(running_tasks.items()):
             # ref is a MessageRef; check both channel_id and thread_id
             if ref.channel_id == channel_id or ref.thread_id == channel_id:
@@ -867,6 +889,24 @@ async def run_main_loop(
 
     async def handle_message(message: discord.Message) -> None:
         """Handle an incoming Discord message."""
+        # Deduplicate: drop duplicate MESSAGE_CREATE events
+        message_id = getattr(message, "id", None)
+        if message.guild is not None and isinstance(message_id, int):
+            key = (message.guild.id, message_id)
+            if key in seen_message_keys:
+                logger.debug(
+                    "message.ignored",
+                    reason="duplicate_message",
+                    guild_id=message.guild.id,
+                    message_id=message_id,
+                )
+                return
+            seen_message_keys.add(key)
+            seen_messages_order.append(key)
+            if len(seen_messages_order) > _SEEN_MESSAGES_LIMIT:
+                oldest = seen_messages_order.popleft()
+                seen_message_keys.discard(oldest)
+
         logger.debug(
             "message.raw",
             channel_type=type(message.channel).__name__,
@@ -1557,9 +1597,24 @@ async def run_main_loop(
     # Set up message handler
     cfg.bot.set_message_handler(handle_message)
 
-    # Handle cancel button interactions
+    # Handle cancel and steer button interactions
     @cfg.bot.bot.event
     async def on_interaction(interaction: discord.Interaction) -> None:
+        # Deduplicate interactions (Discord can redeliver on retries)
+        if interaction.id is not None:
+            if interaction.id in seen_interaction_ids:
+                logger.debug(
+                    "interaction.ignored",
+                    reason="duplicate_interaction",
+                    interaction_id=interaction.id,
+                )
+                return
+            seen_interaction_ids.add(interaction.id)
+            seen_interactions_order.append(interaction.id)
+            if len(seen_interactions_order) > _SEEN_INTERACTIONS_LIMIT:
+                oldest = seen_interactions_order.popleft()
+                seen_interaction_ids.discard(oldest)
+
         # Handle component interactions (buttons)
         if interaction.type == discord.InteractionType.component:
             if interaction.data:
@@ -1571,11 +1626,84 @@ async def run_main_loop(
                     if not is_user_allowed(cfg.allowed_user_ids, user_id):
                         await interaction.response.defer()
                         return
-                    # Get the channel where the cancel was clicked
                     channel_id = interaction.channel_id
+                    message_id = interaction.message.id if interaction.message else None
                     if channel_id is not None:
-                        await cancel_task(channel_id)
+                        await cancel_task(
+                            channel_id,
+                            message_id=message_id,
+                        )
                     await interaction.response.defer()
+                    return
+                if custom_id == STEER_BUTTON_ID:
+                    user_id = getattr(getattr(interaction, "user", None), "id", None)
+                    if not isinstance(user_id, int):
+                        user_id = None
+                    if not is_user_allowed(cfg.allowed_user_ids, user_id):
+                        await interaction.response.defer()
+                        return
+                    channel_id = interaction.channel_id
+                    message_id = interaction.message.id if interaction.message else None
+                    if channel_id is not None and message_id is not None and scheduler is not None:
+                        job = await scheduler.get_queued(channel_id, message_id)
+                        if job is None:
+                            await interaction.response.defer()
+                            return
+                        # Find active turn control for this resume token
+                        control = None
+                        for running_task in running_tasks.values():
+                            if running_task.resume == job.resume_token:
+                                control = running_task.control
+                                break
+                        if control is None:
+                            await interaction.response.defer()
+                            return
+                        claimed = await scheduler.claim_queued(channel_id, message_id)
+                        if claimed is None:
+                            await interaction.response.defer()
+                            return
+                        try:
+                            await control.steer(claimed.text)
+                        except Exception as exc:
+                            await scheduler.requeue_front(claimed)
+                            logger.warning(
+                                "steer.failed",
+                                channel_id=channel_id,
+                                message_id=message_id,
+                                error=str(exc),
+                                error_type=exc.__class__.__name__,
+                            )
+                            await interaction.response.defer()
+                            return
+                        # Edit progress message to show steered label
+                        tracker = ProgressTracker(engine=job.resume_token.engine)
+                        tracker.set_resume(job.resume_token)
+                        context_line = cfg.runtime.format_context_line(job.context)
+                        resume_formatter = None
+                        if cfg.show_resume_line or cfg.session_mode != "chat":
+                            resume_formatter = cfg.runtime.resolve_runner(
+                                resume_token=job.resume_token,
+                                engine_override=None,
+                            ).runner.format_resume
+                        state = tracker.snapshot(
+                            resume_formatter=resume_formatter,
+                            context_line=context_line,
+                        )
+                        steered = cfg.exec_cfg.presenter.render_progress(
+                            state,
+                            elapsed_s=0.0,
+                            label="steered",
+                        )
+                        await cfg.exec_cfg.transport.edit(
+                            ref=MessageRef(
+                                channel_id=channel_id,
+                                message_id=message_id,
+                                thread_id=job.thread_id,
+                            ),
+                            message=steered,
+                        )
+                        await interaction.response.defer()
+                        return
             return
 
         # For application commands, let Pycord handle them

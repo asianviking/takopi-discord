@@ -72,6 +72,8 @@ uploads_dir = "incoming"         # Relative path in the repo
 enabled = false                  # Transcribe audio attachments with no text prompt
 # max_bytes = 10485760           # 10MB
 whisper_model = "base"
+# voice_transcription_base_url = "http://localhost:8000/v1"  # Optional: local transcription server
+# voice_transcription_api_key = "local"                      # Optional: key for transcription server
 ```
 
 State is automatically saved to `~/.takopi/discord_state.json`. Chat preferences
@@ -95,6 +97,11 @@ State is automatically saved to `~/.takopi/discord_state.json`. Chat preferences
   - `takopi setup` is not a core command in current Takopi.
   - Use onboarding via:
     - `takopi --onboard --transport discord`
+- Config changes without restarting
+  - You can edit `~/.takopi/takopi.toml` directly, or use the CLI:
+    - `takopi config set transports.discord.trigger_mode_default mentions`
+    - `takopi config set transports.discord.voice_messages.enabled true`
+  - Enable `watch_config = true` for hot reload of command registrations.
 
 ## Slash Commands
 

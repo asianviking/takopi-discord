@@ -1533,6 +1533,7 @@ async def _handle_engine_command(
             engine_override=engine_id,
             thread_id=thread_id,
             show_resume_line=cfg.show_resume_line,
+            session_mode=cfg.session_mode,
             run_options=run_options,
         )
 

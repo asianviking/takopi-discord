@@ -197,6 +197,12 @@ class DiscordBackend(TransportBackend):
             enabled=voice_settings.get("enabled", False),
             max_bytes=voice_settings.get("max_bytes", 10 * 1024 * 1024),
             whisper_model=voice_settings.get("whisper_model", "base"),
+            voice_transcription_base_url=voice_settings.get(
+                "voice_transcription_base_url"
+            ),
+            voice_transcription_api_key=voice_settings.get(
+                "voice_transcription_api_key"
+            ),
         )
 
         startup_msg = _build_startup_message(

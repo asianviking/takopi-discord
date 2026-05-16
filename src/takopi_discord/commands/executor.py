@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import anyio
 
@@ -12,7 +12,7 @@ from takopi.commands import CommandExecutor, RunMode, RunRequest, RunResult
 from takopi.config import ConfigError
 from takopi.context import RunContext
 from takopi.logging import bind_run_context, clear_context, get_logger
-from takopi.model import EngineId, ResumeToken
+from takopi.model import Action, ActionEvent, EngineId, ResumeToken, TakopiEvent
 from takopi.runner import Runner
 from takopi.runner_bridge import ExecBridgeConfig, RunningTasks
 from takopi.runner_bridge import IncomingMessage as RunnerIncomingMessage
@@ -22,10 +22,63 @@ from takopi.transport import MessageRef, RenderedMessage, SendOptions
 from takopi.transport_runtime import TransportRuntime
 from takopi.utils.paths import reset_run_base_dir, set_run_base_dir
 
+from ..overrides import supports_reasoning
+
 if TYPE_CHECKING:
     pass
 
 logger = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class _PreludeRunner:
+    """Proxy runner that emits prelude events before the real runner."""
+
+    runner: Runner
+    prelude_events: Sequence[TakopiEvent]
+
+    @property
+    def engine(self) -> str:
+        return self.runner.engine
+
+    def is_resume_line(self, line: str) -> bool:
+        return self.runner.is_resume_line(line)
+
+    def format_resume(self, token: ResumeToken) -> str:
+        return self.runner.format_resume(token)
+
+    def extract_resume(self, text: str | None) -> ResumeToken | None:
+        return self.runner.extract_resume(text)
+
+    async def run(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> anyio.AsyncIterator[TakopiEvent]:
+        for event in self.prelude_events:
+            yield event
+        async for event in self.runner.run(prompt, resume):
+            yield event
+
+
+def _reasoning_warning(
+    *, engine: str, run_options: EngineRunOptions | None
+) -> TakopiEvent | None:
+    if run_options is None or not run_options.reasoning:
+        return None
+    if supports_reasoning(engine):
+        return None
+    message = f"reasoning override is not supported for `{engine}`; ignoring."
+    return ActionEvent(
+        engine=engine,
+        action=Action(
+            id=f"{engine}.override.reasoning",
+            kind="note",
+            title=message,
+            detail={},
+        ),
+        phase="completed",
+        ok=True,
+        message=message,
+    )
 
 
 @dataclass(slots=True)
@@ -104,6 +157,7 @@ async def _run_engine(
     engine_override: EngineId | None = None,
     thread_id: int | None = None,
     show_resume_line: bool = True,
+    session_mode: Literal["stateless", "chat"] = "stateless",
     run_options: EngineRunOptions | None = None,
 ) -> None:
     """Run an engine request."""
@@ -113,8 +167,12 @@ async def _run_engine(
             engine_override=engine_override,
         )
         runner: Runner = entry.runner
-        if not show_resume_line:
+        effective_show_resume_line = show_resume_line or session_mode != "chat"
+        if not effective_show_resume_line:
             runner = cast(Runner, _ResumeLineProxy(runner))
+        warning = _reasoning_warning(engine=runner.engine, run_options=run_options)
+        if warning is not None:
+            runner = cast(Runner, _PreludeRunner(runner, [warning]))
         if not entry.available:
             reason = entry.issue or "engine unavailable"
             await exec_cfg.transport.send(
@@ -205,6 +263,7 @@ class _DiscordCommandExecutor(CommandExecutor):
         thread_id: int | None,
         guild_id: int | None,
         show_resume_line: bool,
+        session_mode: Literal["stateless", "chat"] = "stateless",
         default_engine_override: EngineId | None,
     ) -> None:
         self._exec_cfg = exec_cfg
@@ -217,6 +276,7 @@ class _DiscordCommandExecutor(CommandExecutor):
         self._thread_id = thread_id
         self._guild_id = guild_id
         self._show_resume_line = show_resume_line
+        self._session_mode = session_mode
         self._default_engine_override = default_engine_override
         self._reply_ref = MessageRef(
             channel_id=channel_id,
@@ -304,6 +364,7 @@ class _DiscordCommandExecutor(CommandExecutor):
                 engine_override=engine,
                 thread_id=self._thread_id,
                 show_resume_line=self._show_resume_line,
+                session_mode=self._session_mode,
                 run_options=run_options,
             )
             return RunResult(engine=engine, message=capture.last_message)
@@ -322,6 +383,7 @@ class _DiscordCommandExecutor(CommandExecutor):
             engine_override=engine,
             thread_id=self._thread_id,
             show_resume_line=self._show_resume_line,
+            session_mode=self._session_mode,
             run_options=run_options,
         )
         return RunResult(engine=engine, message=None)

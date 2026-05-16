@@ -70,6 +70,7 @@ async def dispatch_command(
         thread_id=thread_id,
         guild_id=guild_id,
         show_resume_line=cfg.show_resume_line,
+        session_mode=cfg.session_mode,
         default_engine_override=default_engine_override,
     )
 

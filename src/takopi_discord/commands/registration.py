@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from takopi.ids import RESERVED_CHAT_COMMANDS
 from takopi.commands import get_command, list_command_ids
 from takopi.logging import get_logger
 from takopi.model import EngineId, ResumeToken
@@ -26,8 +27,9 @@ logger = get_logger(__name__)
 
 
 def discover_command_ids(allowlist: set[str] | None) -> set[str]:
-    """Discover available command plugin IDs."""
-    return {cmd_id.lower() for cmd_id in list_command_ids(allowlist=allowlist)}
+    """Discover available command plugin IDs, excluding reserved names."""
+    discovered = {cmd_id.lower() for cmd_id in list_command_ids(allowlist=allowlist)}
+    return discovered - RESERVED_CHAT_COMMANDS
 
 
 def _format_plugin_starter_message(

@@ -11,11 +11,14 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from .prefs import DiscordPrefsStore
 
-# Valid reasoning levels (matching telegram transport)
-REASONING_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
-
-# Engines that support reasoning overrides
-REASONING_ENGINES = frozenset({"codex"})
+# Valid reasoning levels by engine, matching upstream takopi.
+REASONING_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
+REASONING_LEVELS_BY_ENGINE = {
+    "claude": ("low", "medium", "high", "xhigh", "max"),
+    "codex": REASONING_LEVELS,
+    "pi": REASONING_LEVELS,
+}
+REASONING_ENGINES = frozenset(REASONING_LEVELS_BY_ENGINE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +208,11 @@ def supports_reasoning(engine_id: str) -> bool:
     return engine_id in REASONING_ENGINES
 
 
-def is_valid_reasoning_level(level: str) -> bool:
-    """Check if a reasoning level is valid."""
-    return level in REASONING_LEVELS
+def allowed_reasoning_levels(engine_id: str) -> tuple[str, ...]:
+    """Return valid reasoning levels for an engine."""
+    return REASONING_LEVELS_BY_ENGINE.get(engine_id, ())
+
+
+def is_valid_reasoning_level(engine_id: str, level: str) -> bool:
+    """Check if a reasoning level is valid for an engine."""
+    return level in allowed_reasoning_levels(engine_id)

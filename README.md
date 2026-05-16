@@ -21,10 +21,10 @@ Voice channels can be created with `/voice` and are linked to a thread's project
 
 ```
 TAKOPI (category)
-├── #main                 ← bound to ~/dev/takopi
+├── #main                 ← bound to project alias: takopi
 │   ├── feat/voice        ← thread on branch: feat/voice
 │   └── fix typo          ← session on main
-├── #discord              ← bound to ~/dev/takopi-discord
+├── #discord              ← bound to project alias: takopi-discord
 └── 🔊 Voice: feat/voice  ← voice channel linked to feat/voice thread
 ```
 
@@ -85,7 +85,8 @@ State is automatically saved to `~/.takopi/discord_state.json`. Chat preferences
 2. Create a bot and copy the token
 3. Enable "Message Content Intent" under Privileged Gateway Intents
 4. Run `takopi --onboard --transport discord` and follow the prompts
-5. Invite the bot to your server using the generated URL
+5. Register repos with `takopi init <project-alias>` so `/bind` can use those aliases
+6. Invite the bot to your server using the generated URL
 
 ## Troubleshooting
 
@@ -107,7 +108,7 @@ State is automatically saved to `~/.takopi/discord_state.json`. Chat preferences
 
 ### Core Commands
 
-- `/bind <project> [worktrees_dir] [default_engine] [worktree_base]` - Bind channel to a project
+- `/bind <project> [worktrees_dir] [default_engine] [worktree_base]` - Bind channel to a configured Takopi project alias/key
 - `/unbind` - Remove project binding
 - `/status` - Show current channel/thread context and status
 - `/ctx [show|set|clear]` - Show or modify context binding
@@ -129,7 +130,7 @@ These commands allow you to target a specific engine regardless of the channel's
 
 - `/agent [show|set|clear] [engine]` - Show or override the default agent for this channel/thread
 - `/model [engine] [model]` - Show or set model override for an engine
-- `/reasoning [engine] [level]` - Show or set reasoning level (minimal/low/medium/high/xhigh)
+- `/reasoning [engine] [level]` - Show or set reasoning level for Codex, Claude, or Pi (Claude also supports `max`)
 - `/trigger [all|mentions|clear]` - Set when bot responds (all messages or only @mentions)
 
 ### File Transfer

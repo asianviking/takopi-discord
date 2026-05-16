@@ -16,6 +16,17 @@ class DummyThread:
         self.parent_id = parent_id
 
 
+class FakeRuntime:
+    def __init__(self, projects: dict[str, str]) -> None:
+        self.projects = projects
+
+    def normalize_project_key(self, value: str) -> str | None:
+        return self.projects.get(value.strip().lower())
+
+    def project_aliases(self) -> tuple[str, ...]:
+        return tuple(self.projects)
+
+
 @pytest.mark.anyio
 async def test_ctx_show_in_thread_reports_bound_and_resolved(
     monkeypatch: pytest.MonkeyPatch,
@@ -219,3 +230,80 @@ async def test_ctx_set_in_channel_updates_project_and_base_branch(
             worktree_base="dev",
         ),
     )
+
+
+@pytest.mark.anyio
+async def test_ctx_set_normalizes_project_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import takopi_discord.handlers as handlers
+
+    monkeypatch.setattr(handlers.discord, "Thread", DummyThread)
+    monkeypatch.setattr(handlers, "_require_admin", AsyncMock(return_value=True))
+
+    ctx = MagicMock()
+    ctx.guild = MagicMock()
+    ctx.guild.id = 1
+    ctx.channel_id = 20
+    ctx.channel = MagicMock()
+    ctx.respond = AsyncMock()
+
+    state_store = MagicMock()
+    state_store.get_context = AsyncMock(return_value=None)
+    state_store.set_context = AsyncMock()
+
+    await handlers._handle_ctx_command(
+        ctx,
+        action="set",
+        project="Takopi",
+        branch="@main",
+        state_store=state_store,
+        runtime=FakeRuntime({"takopi": "takopi"}),
+    )
+
+    state_store.set_context.assert_awaited_once_with(
+        1,
+        20,
+        DiscordChannelContext(
+            project="takopi",
+            worktrees_dir=".worktrees",
+            default_engine="claude",
+            worktree_base="main",
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_ctx_set_rejects_unknown_project_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import takopi_discord.handlers as handlers
+
+    monkeypatch.setattr(handlers.discord, "Thread", DummyThread)
+    monkeypatch.setattr(handlers, "_require_admin", AsyncMock(return_value=True))
+
+    ctx = MagicMock()
+    ctx.guild = MagicMock()
+    ctx.guild.id = 1
+    ctx.channel_id = 20
+    ctx.channel = MagicMock()
+    ctx.respond = AsyncMock()
+
+    state_store = MagicMock()
+    state_store.get_context = AsyncMock(return_value=None)
+    state_store.set_context = AsyncMock()
+
+    await handlers._handle_ctx_command(
+        ctx,
+        action="set",
+        project="/home/me/repo",
+        branch="@main",
+        state_store=state_store,
+        runtime=FakeRuntime({"takopi": "takopi"}),
+    )
+
+    state_store.set_context.assert_not_awaited()
+    args, kwargs = ctx.respond.call_args
+    content = args[0] if args else kwargs["content"]
+    assert "Unknown project" in content
+    assert "`takopi`" in content

@@ -9,7 +9,7 @@ import discord
 
 from .allowlist import is_user_allowed
 from .overrides import (
-    REASONING_LEVELS,
+    allowed_reasoning_levels,
     is_valid_reasoning_level,
     resolve_effective_default_engine,
     resolve_overrides,
@@ -59,6 +59,30 @@ def _normalize_branch_name(value: str) -> str:
     return branch.strip()
 
 
+def _normalize_project_input(
+    project: str,
+    *,
+    runtime: TransportRuntime | None,
+) -> tuple[str | None, str | None]:
+    """Normalize a user-supplied project alias/key to Takopi's project key."""
+    value = project.strip()
+    if not value:
+        return None, "project is required"
+    if runtime is None:
+        return value, None
+    normalized = runtime.normalize_project_key(value)
+    if normalized is not None:
+        return normalized, None
+    aliases = tuple(runtime.project_aliases())
+    if aliases:
+        known = ", ".join(f"`{alias}`" for alias in aliases)
+        return None, f"Unknown project `{value}`. Use one of: {known}"
+    return (
+        None,
+        f"Unknown project `{value}`. Register projects with `takopi init <alias>` first.",
+    )
+
+
 async def _handle_ctx_command(
     ctx: discord.ApplicationContext,
     *,
@@ -66,6 +90,7 @@ async def _handle_ctx_command(
     project: str | None,
     branch: str | None,
     state_store: DiscordStateStore,
+    runtime: TransportRuntime | None = None,
 ) -> None:
     """Handle /ctx show|clear|set for channel/thread context."""
     from .types import DiscordChannelContext, DiscordThreadContext
@@ -171,6 +196,13 @@ async def _handle_ctx_command(
                 "Usage: `/ctx set <project> [@base-branch]`", ephemeral=True
             )
             return
+        normalized_project, project_error = _normalize_project_input(
+            project,
+            runtime=runtime,
+        )
+        if project_error is not None or normalized_project is None:
+            await ctx.respond(project_error or "Invalid project.", ephemeral=True)
+            return
 
         worktrees_dir = (
             channel_context.worktrees_dir if channel_context else ".worktrees"
@@ -183,7 +215,7 @@ async def _handle_ctx_command(
         )
 
         new_channel_context = DiscordChannelContext(
-            project=project,
+            project=normalized_project,
             worktrees_dir=worktrees_dir,
             default_engine=default_engine,
             worktree_base=worktree_base,
@@ -358,7 +390,7 @@ def register_slash_commands(
     async def bind_command(
         ctx: discord.ApplicationContext,
         project: str = discord.Option(
-            description="The project path (e.g., ~/dev/myproject)"
+            description="Project alias/key from takopi config"
         ),
         worktrees_dir: str = discord.Option(
             default=".worktrees",
@@ -387,8 +419,16 @@ def register_slash_commands(
 
         from .types import DiscordChannelContext
 
+        project_key, project_error = _normalize_project_input(
+            project,
+            runtime=runtime,
+        )
+        if project_error is not None or project_key is None:
+            await ctx.respond(project_error or "Invalid project.", ephemeral=True)
+            return
+
         context = DiscordChannelContext(
-            project=project,
+            project=project_key,
             worktrees_dir=worktrees_dir,
             default_engine=default_engine,
             worktree_base=worktree_base,
@@ -396,7 +436,7 @@ def register_slash_commands(
         await state_store.set_context(guild_id, channel_id, context)
 
         await ctx.respond(
-            f"Bound channel to project `{project}`\n"
+            f"Bound channel to project `{project_key}`\n"
             f"- Default branch: `{worktree_base}`\n"
             f"- Worktrees dir: `{worktrees_dir}`\n"
             f"- Engine: `{default_engine}`\n\n"
@@ -481,7 +521,7 @@ def register_slash_commands(
         ),
         project: str | None = discord.Option(
             default=None,
-            description="Project path (channel only): ~/dev/myproject",
+            description="Project alias/key from takopi config (channel only)",
         ),
         branch: str | None = discord.Option(
             default=None,
@@ -502,6 +542,7 @@ def register_slash_commands(
             project=project,
             branch=branch,
             state_store=state_store,
+            runtime=runtime,
         )
 
     @pycord_bot.slash_command(name="agent", description="Show or manage default agent")
@@ -707,11 +748,11 @@ def register_slash_commands(
         ctx: discord.ApplicationContext,
         engine: str | None = discord.Option(
             default=None,
-            description="Engine to configure (e.g., codex)",
+            description="Engine to configure (codex, claude, pi)",
         ),
         level: str | None = discord.Option(
             default=None,
-            description="Reasoning level (minimal/low/medium/high/xhigh) or 'clear'",
+            description="Reasoning level or 'clear' (Claude also supports max)",
         ),
     ) -> None:
         """Show or set reasoning level override."""
@@ -746,6 +787,8 @@ def register_slash_commands(
             await ctx.respond("\n".join(lines), ephemeral=True)
             return
 
+        engine_id = engine.lower()
+
         # Setting an override requires admin
         if level is not None:
             if not await _require_admin(ctx):
@@ -753,44 +796,49 @@ def register_slash_commands(
 
             if level.lower() == "clear":
                 await prefs_store.set_reasoning_override(
-                    guild_id, target_id, engine, None
+                    guild_id, target_id, engine_id, None
                 )
                 await ctx.respond(
-                    f"Reasoning override cleared for `{engine}`.", ephemeral=True
-                )
-                return
-
-            if not is_valid_reasoning_level(level.lower()):
-                valid = ", ".join(sorted(REASONING_LEVELS))
-                await ctx.respond(
-                    f"Invalid reasoning level. Valid levels: {valid}", ephemeral=True
+                    f"Reasoning override cleared for `{engine_id}`.", ephemeral=True
                 )
                 return
 
-            if not supports_reasoning(engine):
+            if not supports_reasoning(engine_id):
                 await ctx.respond(
-                    f"Engine `{engine}` does not support reasoning overrides.",
+                    f"Engine `{engine_id}` does not support reasoning overrides.",
+                    ephemeral=True,
+                )
+                return
+
+            if not is_valid_reasoning_level(engine_id, level.lower()):
+                valid = ", ".join(allowed_reasoning_levels(engine_id))
+                await ctx.respond(
+                    f"Invalid reasoning level for `{engine_id}`. Valid levels: {valid}",
                     ephemeral=True,
                 )
                 return
 
             await prefs_store.set_reasoning_override(
-                guild_id, target_id, engine, level.lower()
+                guild_id, target_id, engine_id, level.lower()
             )
             await ctx.respond(
-                f"Reasoning override set for `{engine}`: `{level.lower()}`",
+                f"Reasoning override set for `{engine_id}`: `{level.lower()}`",
                 ephemeral=True,
             )
             return
 
         # Show override for specific engine
-        current = await prefs_store.get_reasoning_override(guild_id, target_id, engine)
+        current = await prefs_store.get_reasoning_override(
+            guild_id, target_id, engine_id
+        )
         if current:
             await ctx.respond(
-                f"Reasoning override for `{engine}`: `{current}`", ephemeral=True
+                f"Reasoning override for `{engine_id}`: `{current}`", ephemeral=True
             )
         else:
-            await ctx.respond(f"No reasoning override for `{engine}`.", ephemeral=True)
+            await ctx.respond(
+                f"No reasoning override for `{engine_id}`.", ephemeral=True
+            )
 
     @pycord_bot.slash_command(
         name="trigger", description="Show or set trigger mode (all/mentions)"

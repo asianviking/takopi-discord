@@ -66,6 +66,39 @@ def _annotate_voice_prompt(prompt: str) -> str:
     return f"(voice transcribed) {prompt}".strip()
 
 
+def _apply_resolved_message(
+    *,
+    prompt: str,
+    engine_id: str,
+    run_context: RunContext | None,
+    resume_token: ResumeToken | None,
+    resolved_msg: Any | None,
+    is_voice_transcribed: bool,
+) -> tuple[str, str, RunContext | None, ResumeToken | None]:
+    """Apply Takopi's directive/resume resolution to Discord message state."""
+    if resolved_msg is None:
+        if is_voice_transcribed:
+            prompt = _annotate_voice_prompt(prompt)
+        return prompt, engine_id, run_context, resume_token
+
+    resolved_prompt = resolved_msg.prompt if resolved_msg.prompt.strip() else prompt
+    if is_voice_transcribed:
+        prompt = _annotate_voice_prompt(resolved_prompt)
+    else:
+        prompt = resolved_prompt
+
+    if resolved_msg.context is not None:
+        run_context = resolved_msg.context
+
+    if resolved_msg.resume_token is not None:
+        resume_token = resolved_msg.resume_token
+        engine_id = resume_token.engine
+    elif resolved_msg.engine_override is not None:
+        engine_id = resolved_msg.engine_override
+
+    return prompt, engine_id, run_context, resume_token
+
+
 class _BoundedDeduper:
     """Bounded insertion-order deduper for Discord retry deliveries."""
 
@@ -1371,6 +1404,8 @@ async def run_main_loop(
 
         # Prefer an explicit resume token (from message text or replied-to bot message)
         # over any stored "latest token".
+        from takopi.directives import DirectiveError
+
         try:
             resolved_msg = cfg.runtime.resolve_message(
                 text=prompt,
@@ -1378,6 +1413,9 @@ async def run_main_loop(
                 ambient_context=run_context,
                 chat_id=session_key,
             )
+        except DirectiveError as exc:
+            await message.reply(f"error:\n{exc}", mention_author=False)
+            return
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "resume.resolve_failed",
@@ -1386,21 +1424,48 @@ async def run_main_loop(
             )
             resolved_msg = None
 
+        prompt, engine_id, run_context, resume_token = _apply_resolved_message(
+            prompt=prompt,
+            engine_id=engine_id,
+            run_context=run_context,
+            resume_token=resume_token,
+            resolved_msg=resolved_msg,
+            is_voice_transcribed=is_voice_transcribed,
+        )
         if resolved_msg is not None and resolved_msg.resume_token is not None:
-            resume_token = resolved_msg.resume_token
-            engine_id = resume_token.engine
             logger.debug(
                 "resume.extracted_from_reply",
                 engine_id=engine_id,
                 source="reply" if reply_text else "message",
             )
-        if is_voice_transcribed:
-            resolved_prompt = (
-                resolved_msg.prompt
-                if resolved_msg is not None and resolved_msg.prompt.strip()
-                else prompt
+
+        if (
+            is_new_thread
+            and branch_override is None
+            and thread_id is not None
+            and state_store is not None
+            and guild_id is not None
+            and resolved_msg is not None
+            and resolved_msg.context is not None
+            and resolved_msg.context.project is not None
+            and resolved_msg.context.branch is not None
+        ):
+            default_engine = cfg.runtime.resolve_engine(
+                engine_override=resolved_msg.engine_override,
+                context=resolved_msg.context,
             )
-            prompt = _annotate_voice_prompt(resolved_prompt)
+            await state_store.set_context(
+                guild_id,
+                thread_id,
+                DiscordThreadContext(
+                    project=resolved_msg.context.project,
+                    branch=resolved_msg.context.branch,
+                    worktrees_dir=channel_context.worktrees_dir
+                    if channel_context is not None
+                    else ".worktrees",
+                    default_engine=default_engine,
+                ),
+            )
 
         if (
             resume_token is None

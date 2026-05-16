@@ -885,7 +885,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.0.0" },
     { name = "py-cord", specifier = ">=2.6.0" },
     { name = "pywhispercpp", specifier = ">=1.4.0" },
-    { name = "takopi", specifier = ">=0.23.1" },
+    { name = "takopi", specifier = ">=0.23.3" },
 ]
 
 [package.metadata.requires-dev]

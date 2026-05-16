@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 REASONING_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 
 # Engines that support reasoning overrides
-REASONING_ENGINES = frozenset({"codex"})
+REASONING_ENGINES = frozenset({"claude", "codex", "pi"})
 
 
 @dataclass(frozen=True, slots=True)

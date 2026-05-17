@@ -156,7 +156,11 @@ To transcribe voice message attachments in text chat, enable `[transports.discor
 
 ### Plugins
 
-Custom command plugins can extend the bot's functionality. Plugin commands are automatically registered as slash commands when loaded by takopi.
+Custom command plugins can extend the bot's functionality. Plugin commands are
+automatically registered as slash commands when loaded by takopi. When started
+from a bound project channel, plugin slash commands create a thread just like
+messages and engine slash commands; inside an existing thread, they run in that
+thread.
 
 ## Message Features
 

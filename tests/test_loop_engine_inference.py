@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 from takopi.context import RunContext
 from takopi.model import ResumeToken
 from takopi.transport_runtime import ResolvedMessage
-from takopi_discord.loop import _apply_resolved_message, _extract_engine_id_from_header
+from takopi_discord.loop import (
+    _apply_resolved_message,
+    _extract_engine_id_from_header,
+    _maybe_update_thread_context_from_directives,
+)
+from takopi_discord.types import DiscordChannelContext, DiscordThreadContext
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.resolved: list[RunContext] = []
+
+    def resolve_run_cwd(self, context: RunContext) -> Path:
+        self.resolved.append(context)
+        return Path("/repo/.worktrees") / (context.branch or "main")
 
 
 class TestExtractEngineIdFromHeader:
@@ -91,3 +109,95 @@ def test_apply_resolved_message_annotates_voice_after_directives_are_removed() -
     )
 
     assert prompt == "(voice transcribed) fix it"
+
+
+@pytest.mark.anyio
+async def test_thread_directive_rebind_keeps_parent_project_and_renames() -> None:
+    state_store = MagicMock()
+    state_store.set_context = AsyncMock()
+    thread = MagicMock()
+    thread.edit = AsyncMock()
+    runtime = FakeRuntime()
+
+    result = await _maybe_update_thread_context_from_directives(
+        resolved_msg=ResolvedMessage(
+            prompt="ship it",
+            resume_token=None,
+            engine_override=None,
+            context=RunContext(project="other-project", branch="feat/new"),
+            context_source="directives",
+        ),
+        state_store=state_store,
+        guild_id=1,
+        thread_id=10,
+        thread_channel=thread,
+        channel_context=DiscordChannelContext(
+            project="takopi-discord",
+            worktrees_dir=".worktrees",
+            default_engine="claude",
+            worktree_base="main",
+        ),
+        thread_context=DiscordThreadContext(
+            project="takopi-discord",
+            branch="main",
+            worktrees_dir=".worktrees",
+            default_engine="codex",
+        ),
+        runtime=runtime,
+    )
+
+    expected_context = RunContext(project="takopi-discord", branch="feat/new")
+    assert result == expected_context
+    assert runtime.resolved == [expected_context]
+    state_store.set_context.assert_awaited_once_with(
+        1,
+        10,
+        DiscordThreadContext(
+            project="takopi-discord",
+            branch="feat/new",
+            worktrees_dir=".worktrees",
+            default_engine="codex",
+        ),
+    )
+    thread.edit.assert_awaited_once_with(name="feat/new")
+
+
+@pytest.mark.anyio
+async def test_thread_project_only_directive_keeps_existing_branch() -> None:
+    state_store = MagicMock()
+    state_store.set_context = AsyncMock()
+    thread = MagicMock()
+    thread.edit = AsyncMock()
+    runtime = FakeRuntime()
+
+    result = await _maybe_update_thread_context_from_directives(
+        resolved_msg=ResolvedMessage(
+            prompt="ship it",
+            resume_token=None,
+            engine_override=None,
+            context=RunContext(project="other-project", branch=None),
+            context_source="directives",
+        ),
+        state_store=state_store,
+        guild_id=1,
+        thread_id=10,
+        thread_channel=thread,
+        channel_context=DiscordChannelContext(
+            project="takopi-discord",
+            worktrees_dir=".worktrees",
+            default_engine="claude",
+            worktree_base="main",
+        ),
+        thread_context=DiscordThreadContext(
+            project="takopi-discord",
+            branch="existing",
+            worktrees_dir=".worktrees",
+            default_engine="codex",
+        ),
+        runtime=runtime,
+    )
+
+    assert result == RunContext(project="takopi-discord", branch="existing")
+    assert runtime.resolved == []
+    state_store.set_context.assert_not_awaited()
+    thread.edit.assert_not_awaited()

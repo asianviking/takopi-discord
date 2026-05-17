@@ -265,6 +265,7 @@ class _DiscordCommandExecutor(CommandExecutor):
         show_resume_line: bool,
         session_mode: Literal["stateless", "chat"] = "stateless",
         default_engine_override: EngineId | None,
+        default_context: RunContext | None = None,
     ) -> None:
         self._exec_cfg = exec_cfg
         self._runtime = runtime
@@ -278,6 +279,7 @@ class _DiscordCommandExecutor(CommandExecutor):
         self._show_resume_line = show_resume_line
         self._session_mode = session_mode
         self._default_engine_override = default_engine_override
+        self._default_context = default_context
         self._reply_ref = MessageRef(
             channel_id=channel_id,
             message_id=user_msg_id,
@@ -287,7 +289,9 @@ class _DiscordCommandExecutor(CommandExecutor):
     def _apply_default_context(self, request: RunRequest) -> RunRequest:
         if request.context is not None:
             return request
-        context = self._runtime.default_context_for_chat(self._channel_id)
+        context = self._default_context
+        if context is None:
+            context = self._runtime.default_context_for_chat(self._channel_id)
         if context is None:
             return request
         return RunRequest(

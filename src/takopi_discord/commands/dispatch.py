@@ -19,6 +19,8 @@ from takopi.transport import MessageRef
 from .executor import _DiscordCommandExecutor
 
 if TYPE_CHECKING:
+    from takopi.context import RunContext
+
     from ..bridge import DiscordBridgeConfig
 
 logger = get_logger(__name__)
@@ -52,6 +54,7 @@ async def dispatch_command(
     default_engine_override: EngineId | None,
     engine_overrides_resolver: Callable[[EngineId], Awaitable[EngineRunOptions | None]]
     | None,
+    default_context: RunContext | None = None,
 ) -> bool:
     """Dispatch a command to its plugin backend.
 
@@ -72,6 +75,7 @@ async def dispatch_command(
         show_resume_line=cfg.show_resume_line,
         session_mode=cfg.session_mode,
         default_engine_override=default_engine_override,
+        default_context=default_context,
     )
 
     message_ref = MessageRef(

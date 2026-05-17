@@ -99,6 +99,82 @@ def _apply_resolved_message(
     return prompt, engine_id, run_context, resume_token
 
 
+async def _rename_thread_to_branch(thread: object, branch: str) -> bool:
+    edit = getattr(thread, "edit", None)
+    if not callable(edit):
+        return False
+    try:
+        await edit(name=branch)
+    except discord.HTTPException:
+        logger.warning("thread.rename_failed", branch=branch)
+        return False
+    return True
+
+
+async def _maybe_update_thread_context_from_directives(
+    *,
+    resolved_msg: Any | None,
+    state_store: DiscordStateStore | None,
+    guild_id: int | None,
+    thread_id: int | None,
+    thread_channel: object,
+    channel_context: DiscordChannelContext | None,
+    thread_context: DiscordThreadContext | None,
+    runtime: Any,
+) -> RunContext | None:
+    """Persist directive branch changes into an existing Discord thread.
+
+    Telegram topics persist directive-resolved context back onto the topic. For
+    Discord, the parent channel remains the project owner; directives inside a
+    thread may only rebind that thread's branch/worktree.
+    """
+    if (
+        resolved_msg is None
+        or getattr(resolved_msg, "context_source", None) != "directives"
+        or state_store is None
+        or guild_id is None
+        or thread_id is None
+        or channel_context is None
+    ):
+        return None
+
+    from takopi.context import RunContext
+
+    resolved_context = getattr(resolved_msg, "context", None)
+    branch = getattr(resolved_context, "branch", None)
+    if branch is None:
+        if thread_context is not None:
+            return RunContext(
+                project=channel_context.project,
+                branch=thread_context.branch,
+            )
+        return RunContext(
+            project=channel_context.project,
+            branch=channel_context.worktree_base,
+        )
+
+    run_context = RunContext(project=channel_context.project, branch=branch)
+    runtime.resolve_run_cwd(run_context)
+    new_thread_context = DiscordThreadContext(
+        project=channel_context.project,
+        branch=branch,
+        worktrees_dir=channel_context.worktrees_dir,
+        default_engine=thread_context.default_engine
+        if thread_context is not None
+        else channel_context.default_engine,
+    )
+    await state_store.set_context(guild_id, thread_id, new_thread_context)
+    await _rename_thread_to_branch(thread_channel, branch)
+    logger.info(
+        "thread.context_updated_from_directives",
+        guild_id=guild_id,
+        thread_id=thread_id,
+        project=channel_context.project,
+        branch=branch,
+    )
+    return run_context
+
+
 class _BoundedDeduper:
     """Bounded insertion-order deduper for Discord retry deliveries."""
 
@@ -1432,6 +1508,25 @@ async def run_main_loop(
             resolved_msg=resolved_msg,
             is_voice_transcribed=is_voice_transcribed,
         )
+        if not is_new_thread and thread_id is not None:
+            from takopi.config import ConfigError
+
+            try:
+                directive_context = await _maybe_update_thread_context_from_directives(
+                    resolved_msg=resolved_msg,
+                    state_store=state_store,
+                    guild_id=guild_id,
+                    thread_id=thread_id,
+                    thread_channel=message.channel,
+                    channel_context=channel_context,
+                    thread_context=thread_context,
+                    runtime=cfg.runtime,
+                )
+            except ConfigError as exc:
+                await message.reply(f"error:\n{exc}", mention_author=False)
+                return
+            if directive_context is not None:
+                run_context = directive_context
         if resolved_msg is not None and resolved_msg.resume_token is not None:
             logger.debug(
                 "resume.extracted_from_reply",

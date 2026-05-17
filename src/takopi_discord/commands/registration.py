@@ -46,6 +46,19 @@ def _format_plugin_starter_message(
     return full[:slice_len] + "…"
 
 
+def _format_plugin_thread_name(
+    command_id: str,
+    args_text: str,
+    *,
+    max_chars: int = 100,
+) -> str:
+    full = f"{command_id} {args_text}".strip()
+    if len(full) <= max_chars:
+        return full
+    slice_len = max(0, max_chars - 1)
+    return full[:slice_len] + "…"
+
+
 def register_plugin_commands(
     bot: DiscordBotClient,
     cfg: DiscordBridgeConfig,
@@ -120,7 +133,10 @@ async def _handle_plugin_command(
     """Handle a plugin slash command invocation."""
     import anyio
 
+    from takopi.context import RunContext
+
     from ..overrides import resolve_overrides
+    from ..types import DiscordChannelContext, DiscordThreadContext
 
     if ctx.guild is None:
         await ctx.respond("This command can only be used in a server.", ephemeral=True)
@@ -142,11 +158,68 @@ async def _handle_plugin_command(
         author_id = None
     channel_id = ctx.channel_id
     thread_id = None
+    created_new_thread = False
+    attempted_thread_create = False
 
     if isinstance(ctx.channel, discord.Thread):
         thread_id = ctx.channel_id
         if ctx.channel.parent_id:
             channel_id = ctx.channel.parent_id
+
+    channel_context: DiscordChannelContext | None = None
+    thread_context: DiscordThreadContext | None = None
+
+    if thread_id is not None:
+        ctx_data = await state_store.get_context(guild_id, thread_id)
+        if isinstance(ctx_data, DiscordThreadContext):
+            thread_context = ctx_data
+
+    ctx_data = await state_store.get_context(guild_id, channel_id)
+    if isinstance(ctx_data, DiscordChannelContext):
+        channel_context = ctx_data
+
+    if (
+        thread_id is None
+        and isinstance(ctx.channel, discord.TextChannel)
+        and channel_context is not None
+    ):
+        attempted_thread_create = True
+        thread_name = _format_plugin_thread_name(command_id, args_text)
+        created_thread_id = await cfg.bot.create_thread_without_message(
+            channel_id=channel_id,
+            name=thread_name,
+        )
+        if created_thread_id is not None:
+            thread_id = created_thread_id
+            created_new_thread = True
+            thread_context = DiscordThreadContext(
+                project=channel_context.project,
+                branch=channel_context.worktree_base,
+                worktrees_dir=channel_context.worktrees_dir,
+                default_engine=channel_context.default_engine,
+            )
+            await state_store.set_context(guild_id, thread_id, thread_context)
+            logger.info(
+                "plugin.thread_created",
+                command_id=command_id,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                name=thread_name,
+                project=thread_context.project,
+                branch=thread_context.branch,
+            )
+
+    default_context: RunContext | None = None
+    if thread_context is not None:
+        default_context = RunContext(
+            project=thread_context.project,
+            branch=thread_context.branch,
+        )
+    elif channel_context is not None:
+        default_context = RunContext(
+            project=channel_context.project,
+            branch=channel_context.worktree_base,
+        )
 
     # Create engine overrides resolver
     async def engine_overrides_resolver(
@@ -207,6 +280,7 @@ async def _handle_plugin_command(
             on_thread_known=on_thread_known,
             default_engine_override=default_engine_override,
             engine_overrides_resolver=engine_overrides_resolver,
+            default_context=default_context,
         )
         if not handled:
             await cfg.bot.send_message(
@@ -221,4 +295,11 @@ async def _handle_plugin_command(
 
     # Close the deferred interaction promptly; command output goes to the channel/thread.
     target = f"<#{effective_channel_id}>"
-    await ctx.followup.send(f"Started `/{command_id}` in {target}.", ephemeral=True)
+    note = (
+        " (thread creation failed; running in channel)"
+        if attempted_thread_create and not created_new_thread
+        else ""
+    )
+    await ctx.followup.send(
+        f"Started `/{command_id}` in {target}{note}.", ephemeral=True
+    )

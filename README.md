@@ -162,6 +162,11 @@ from a bound project channel, plugin slash commands create a thread just like
 messages and engine slash commands; inside an existing thread, they run in that
 thread.
 
+Plugin-owned Discord components can route back into command plugins by using a
+component `custom_id` of `command:args` or
+`takopi-discord:command:command:args`. The built-in cancel and steer component
+IDs are reserved.
+
 ## Message Features
 
 ### @branch Prefix

@@ -11,8 +11,10 @@ from takopi.model import ResumeToken
 from takopi.transport_runtime import ResolvedMessage
 from takopi_discord.loop import (
     _apply_resolved_message,
+    _dispatch_plugin_component_interaction,
     _extract_engine_id_from_header,
     _maybe_update_thread_context_from_directives,
+    _parse_plugin_component_custom_id,
 )
 from takopi_discord.types import DiscordChannelContext, DiscordThreadContext
 
@@ -24,6 +26,11 @@ class FakeRuntime:
     def resolve_run_cwd(self, context: RunContext) -> Path:
         self.resolved.append(context)
         return Path("/repo/.worktrees") / (context.branch or "main")
+
+
+class DummyThread:
+    def __init__(self, *, parent_id: int | None) -> None:
+        self.parent_id = parent_id
 
 
 class TestExtractEngineIdFromHeader:
@@ -109,6 +116,23 @@ def test_apply_resolved_message_annotates_voice_after_directives_are_removed() -
     )
 
     assert prompt == "(voice transcribed) fix it"
+
+
+def test_parse_plugin_component_custom_id_supports_telegram_shape() -> None:
+    assert _parse_plugin_component_custom_id("hello:world") == ("hello", "world")
+    assert _parse_plugin_component_custom_id("hello") == ("hello", "")
+
+
+def test_parse_plugin_component_custom_id_supports_discord_prefix() -> None:
+    assert _parse_plugin_component_custom_id(
+        "takopi-discord:command:hello:world"
+    ) == ("hello", "world")
+
+
+def test_parse_plugin_component_custom_id_skips_reserved_ids() -> None:
+    assert _parse_plugin_component_custom_id("takopi-discord:cancel") is None
+    assert _parse_plugin_component_custom_id("takopi-discord:steer") is None
+    assert _parse_plugin_component_custom_id("takopi-discord:other") is None
 
 
 @pytest.mark.anyio
@@ -201,3 +225,110 @@ async def test_thread_project_only_directive_keeps_existing_branch() -> None:
     assert runtime.resolved == []
     state_store.set_context.assert_not_awaited()
     thread.edit.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_plugin_component_dispatch_uses_thread_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import takopi_discord.loop as loop
+
+    monkeypatch.setattr(loop.discord, "Thread", DummyThread)
+
+    created_coroutines = []
+
+    def fake_create_task(coro, *, name=None):
+        created_coroutines.append(coro)
+        return MagicMock(name=name)
+
+    dispatch = AsyncMock(return_value=True)
+    monkeypatch.setattr(loop.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(loop, "dispatch_command", dispatch)
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 1
+    interaction.channel_id = 99
+    interaction.channel = DummyThread(parent_id=20)
+    interaction.message = MagicMock()
+    interaction.message.id = 555
+    interaction.user = MagicMock()
+    interaction.user.id = 42
+    interaction.response = MagicMock()
+    interaction.response.defer = AsyncMock()
+
+    state_store = MagicMock()
+
+    async def get_context(_guild_id: int, channel_id: int):
+        if channel_id == 99:
+            return DiscordThreadContext(
+                project="takopi-discord",
+                branch="feat/plugin",
+                worktrees_dir=".worktrees",
+                default_engine="codex",
+            )
+        if channel_id == 20:
+            return DiscordChannelContext(
+                project="takopi-discord",
+                worktrees_dir=".worktrees",
+                default_engine="claude",
+                worktree_base="main",
+            )
+        return None
+
+    state_store.get_context = AsyncMock(side_effect=get_context)
+    prefs_store = MagicMock()
+    cfg = MagicMock()
+    cfg.allowed_user_ids = None
+
+    handled = await _dispatch_plugin_component_interaction(
+        interaction=interaction,
+        custom_id="hello:world",
+        cfg=cfg,
+        state_store=state_store,
+        prefs_store=prefs_store,
+        running_tasks={},
+        current_command_ids={"hello"},
+        refresh_commands=MagicMock(return_value={"hello"}),
+        default_engine_override=None,
+    )
+
+    assert handled is True
+    interaction.response.defer.assert_awaited_once()
+    assert len(created_coroutines) == 1
+    await created_coroutines[0]
+
+    dispatch.assert_awaited_once()
+    kwargs = dispatch.call_args.kwargs
+    assert kwargs["command_id"] == "hello"
+    assert kwargs["args_text"] == "world"
+    assert kwargs["full_text"] == "hello:world"
+    assert kwargs["channel_id"] == 99
+    assert kwargs["thread_id"] == 99
+    assert kwargs["sender_id"] == 42
+    assert kwargs["default_context"] == RunContext(
+        project="takopi-discord",
+        branch="feat/plugin",
+    )
+
+
+@pytest.mark.anyio
+async def test_plugin_component_dispatch_defers_unknown_command() -> None:
+    interaction = MagicMock()
+    interaction.response = MagicMock()
+    interaction.response.defer = AsyncMock()
+
+    handled = await _dispatch_plugin_component_interaction(
+        interaction=interaction,
+        custom_id="missing:world",
+        cfg=MagicMock(),
+        state_store=MagicMock(),
+        prefs_store=MagicMock(),
+        running_tasks={},
+        current_command_ids=set(),
+        refresh_commands=MagicMock(return_value=set()),
+        default_engine_override=None,
+    )
+
+    assert handled is True
+    interaction.response.defer.assert_awaited_once()

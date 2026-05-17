@@ -46,22 +46,20 @@ Last reviewed against upstream `banteg/takopi` `v0.23.3`
 | Voice input | Telegram voice/audio messages | Optional voice message attachment transcription | Intentional difference | Discord also has live voice channels, which are Discord-only UX. |
 | Live voice session | Not a direct Telegram topic equivalent | `/voice` creates a linked Discord voice channel | Intentional difference | Keep as Discord-native extension, not upstream parity debt. |
 | Plugin commands | Upstream plugin command surface | Register plugin commands as Discord slash commands | Done | Channel-level plugin invocations create a thread in bound project channels; thread-level invocations stay in the current thread. |
-| Plugin callback actions | Telegram callback data can dispatch to command plugins | Discord component interactions need a custom-id mapping to command plugins | Needs mapping | Current Discord component handling is reserved for Takopi cancel/steer buttons only. Decide whether plugin-owned Discord buttons/selects are part of transport parity. |
+| Plugin callback actions | Telegram callback data can dispatch to command plugins | Discord component custom IDs route to command plugins | Done | Supports Telegram-style `command:args` and explicit `takopi-discord:command:command:args` custom IDs; built-in cancel/steer IDs remain reserved. |
 | Directive-driven context update | Directives inside a topic can update topic binding and rename the topic | Existing Discord threads update branch binding and rename the thread when directives resolve a new branch | Done | Parent channel remains the project owner; thread directives can only rebind the thread branch/worktree. |
-| Project alias command invocation | `/project-alias ...` can act as an explicit project invocation in Telegram | Bound Discord channels are the primary project selector | Intentional difference | Revisit only if users need ad hoc project selection outside bound channels. |
+| Project alias command invocation | `/project-alias ...` can act as an explicit project invocation in Telegram | Bound Discord channels are the project selector | Not applicable | Discord project selection is channel-scoped by design; adding project alias slash commands would fight the intended UX. |
 | Forwarded message coalescing | Telegram coalesces comment-plus-forward bursts | No direct Discord equivalent | Not applicable | Discord attachment grouping is handled separately through media buffering. |
 | Onboarding/setup | Telegram setup flow | Discord onboarding validates bot token and config | Done | Transport-specific by nature. |
 
 ## Open Parity Gaps
 
-These are the current items that look unaddressed or still need a Discord UX
-decision after comparing against Telegram `v0.23.3`.
+No implementation gaps are currently tracked after comparing against Telegram
+`v0.23.3`.
 
 | Gap | Status | Suggested Discord mapping | Notes |
 | --- | --- | --- | --- |
-| Plugin component/callback routing | Needs mapping | Define a Discord custom-id convention for plugin-owned components, then route allowed component interactions through `CommandContext` like Telegram callback data. | Current Discord component interactions only handle built-in cancel and steer buttons. |
-| Project alias slash commands | Intentional difference | Keep `/bind` + project channels as the project selection UX unless we want ad hoc project commands. | Telegram registers project aliases in the command menu; Discord project selection is channel-scoped by design. |
-| Forward/comment coalescing | Not applicable | No action unless Discord gains a comparable native forwarded-message burst that users expect to prompt with. | Telegram-specific behavior for forwarded message batches. |
+| _none_ | Done | N/A | Project alias slash commands and forwarded message coalescing are marked Not applicable for Discord UX. |
 
 ## Review Workflow
 

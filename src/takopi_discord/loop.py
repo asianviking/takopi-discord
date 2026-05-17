@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Hashable, Mapping
 from dataclasses import dataclass, field
@@ -31,7 +32,7 @@ from .bridge import (
     DiscordBridgeConfig,
     DiscordTransport,
 )
-from .commands import discover_command_ids, register_plugin_commands
+from .commands import dispatch_command, discover_command_ids, register_plugin_commands
 from .handlers import (
     extract_prompt_from_message,
     is_bot_mentioned,
@@ -60,6 +61,7 @@ __all__ = ["run_main_loop"]
 
 _SEEN_MESSAGES_LIMIT = 2048
 _SEEN_INTERACTIONS_LIMIT = 4096
+_PLUGIN_COMPONENT_PREFIX = "takopi-discord:command:"
 
 
 def _annotate_voice_prompt(prompt: str) -> str:
@@ -173,6 +175,147 @@ async def _maybe_update_thread_context_from_directives(
         branch=branch,
     )
     return run_context
+
+
+def _parse_plugin_component_custom_id(custom_id: str | None) -> tuple[str, str] | None:
+    """Parse a Discord component custom_id into a plugin command invocation.
+
+    Supported forms:
+    - "command:args" mirrors Telegram callback data.
+    - "takopi-discord:command:command:args" is the explicit Discord form.
+    """
+    if not custom_id or custom_id in {CANCEL_BUTTON_ID, STEER_BUTTON_ID}:
+        return None
+    if custom_id.startswith(_PLUGIN_COMPONENT_PREFIX):
+        payload = custom_id.removeprefix(_PLUGIN_COMPONENT_PREFIX)
+    elif custom_id.startswith("takopi-discord:"):
+        return None
+    else:
+        payload = custom_id
+    command_id, _, args_text = payload.partition(":")
+    command_id = command_id.strip().lower()
+    if not command_id:
+        return None
+    return command_id, args_text
+
+
+async def _dispatch_plugin_component_interaction(
+    *,
+    interaction: discord.Interaction,
+    custom_id: str | None,
+    cfg: DiscordBridgeConfig,
+    state_store: DiscordStateStore,
+    prefs_store: DiscordPrefsStore,
+    running_tasks: RunningTasks,
+    current_command_ids: set[str],
+    refresh_commands: Callable[[], set[str]],
+    default_engine_override: str | None,
+) -> bool:
+    parsed = _parse_plugin_component_custom_id(custom_id)
+    if parsed is None:
+        return False
+    command_id, args_text = parsed
+    command_ids = current_command_ids
+    if command_id not in command_ids:
+        command_ids = refresh_commands()
+    if command_id not in command_ids:
+        await interaction.response.defer()
+        return True
+
+    user_id = getattr(getattr(interaction, "user", None), "id", None)
+    if not isinstance(user_id, int):
+        user_id = None
+    if not is_user_allowed(cfg.allowed_user_ids, user_id):
+        await interaction.response.defer()
+        return True
+    if interaction.guild is None or interaction.channel_id is None:
+        await interaction.response.defer()
+        return True
+    if interaction.message is None:
+        await interaction.response.defer()
+        return True
+
+    from takopi.context import RunContext
+
+    guild_id = interaction.guild.id
+    parent_channel_id = interaction.channel_id
+    thread_id: int | None = None
+    if isinstance(interaction.channel, discord.Thread):
+        thread_id = interaction.channel_id
+        parent_channel_id = interaction.channel.parent_id or interaction.channel_id
+
+    channel_context: DiscordChannelContext | None = None
+    thread_context: DiscordThreadContext | None = None
+    if thread_id is not None:
+        ctx_data = await state_store.get_context(guild_id, thread_id)
+        if isinstance(ctx_data, DiscordThreadContext):
+            thread_context = ctx_data
+    ctx_data = await state_store.get_context(guild_id, parent_channel_id)
+    if isinstance(ctx_data, DiscordChannelContext):
+        channel_context = ctx_data
+
+    default_context: RunContext | None = None
+    if thread_context is not None:
+        default_context = RunContext(
+            project=thread_context.project,
+            branch=thread_context.branch,
+        )
+    elif channel_context is not None:
+        default_context = RunContext(
+            project=channel_context.project,
+            branch=channel_context.worktree_base,
+        )
+
+    async def engine_overrides_resolver(
+        engine_id: str,
+    ) -> EngineRunOptions | None:
+        overrides = await resolve_overrides(
+            prefs_store, guild_id, parent_channel_id, thread_id, engine_id
+        )
+        if overrides.model or overrides.reasoning:
+            return EngineRunOptions(
+                model=overrides.model,
+                reasoning=overrides.reasoning,
+            )
+        return None
+
+    session_key = thread_id if thread_id is not None else parent_channel_id
+
+    async def on_thread_known(new_token: ResumeToken, _event: anyio.Event) -> None:
+        await state_store.set_session(
+            guild_id,
+            session_key,
+            new_token.engine,
+            new_token.value,
+            author_id=user_id,
+        )
+
+    effective_channel_id = thread_id or parent_channel_id
+    message_id = interaction.message.id
+    await interaction.response.defer()
+
+    asyncio.create_task(
+        dispatch_command(
+            cfg,
+            command_id=command_id,
+            args_text=args_text,
+            full_text=custom_id or "",
+            channel_id=effective_channel_id,
+            message_id=message_id,
+            guild_id=guild_id,
+            thread_id=thread_id,
+            sender_id=user_id,
+            reply_ref=None,
+            reply_text=None,
+            running_tasks=running_tasks,
+            on_thread_known=on_thread_known,
+            default_engine_override=default_engine_override,
+            engine_overrides_resolver=engine_overrides_resolver,
+            default_context=default_context,
+        ),
+        name=f"takopi-discord:component:{command_id}:{effective_channel_id}",
+    )
+    return True
 
 
 class _BoundedDeduper:
@@ -1932,6 +2075,18 @@ async def run_main_loop(
                         )
                         await interaction.response.defer()
                         return
+                if await _dispatch_plugin_component_interaction(
+                    interaction=interaction,
+                    custom_id=custom_id,
+                    cfg=cfg,
+                    state_store=state_store,
+                    prefs_store=prefs_store,
+                    running_tasks=running_tasks,
+                    current_command_ids=current_command_ids,
+                    refresh_commands=refresh_commands,
+                    default_engine_override=default_engine_override,
+                ):
+                    return
             return
 
         # For application commands, let Pycord handle them

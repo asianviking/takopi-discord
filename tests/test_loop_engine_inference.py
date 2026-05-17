@@ -124,9 +124,10 @@ def test_parse_plugin_component_custom_id_supports_telegram_shape() -> None:
 
 
 def test_parse_plugin_component_custom_id_supports_discord_prefix() -> None:
-    assert _parse_plugin_component_custom_id(
-        "takopi-discord:command:hello:world"
-    ) == ("hello", "world")
+    assert _parse_plugin_component_custom_id("takopi-discord:command:hello:world") == (
+        "hello",
+        "world",
+    )
 
 
 def test_parse_plugin_component_custom_id_skips_reserved_ids() -> None:

@@ -38,8 +38,7 @@ class TestFormatPluginThreadName:
 
     def test_with_args(self) -> None:
         assert (
-            _format_plugin_thread_name("hello", "world", max_chars=100)
-            == "hello world"
+            _format_plugin_thread_name("hello", "world", max_chars=100) == "hello world"
         )
 
     def test_truncates_with_ellipsis(self) -> None:

@@ -1,4 +1,4 @@
-"""Helpers for Discord resume-token rendering."""
+"""Helpers for Discord footer rendering."""
 
 from __future__ import annotations
 
@@ -20,6 +20,11 @@ def should_render_resume_line(
     return show_resume_line and not should_resume_session(
         session_mode, thread_id=thread_id
     )
+
+
+def should_render_context_line(*, thread_id: int | None) -> bool:
+    """Whether a visible context line should be included in Discord output."""
+    return thread_id is None
 
 
 @dataclass(slots=True)

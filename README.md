@@ -193,6 +193,9 @@ Discord thread name is updated to the branch name.
 - Messages in channels automatically create threads
 - Each thread maintains its own server-side session with resume tokens
 - Multiple sessions can run simultaneously across threads
+- Thread message footers omit resume-token and `ctx:` lines because the parent
+  channel and thread name already identify the project and branch; use `/ctx`
+  commands to inspect or change stored context
 - `session_mode = "stateless"` disables server-side resume; reply-chain resume
   still works. Legacy `session_mode = "chat"` is treated the same as `thread`.
 - Progress messages include Discord buttons for cancellation, and queued replies

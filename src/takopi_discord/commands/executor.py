@@ -23,7 +23,11 @@ from takopi.transport_runtime import TransportRuntime
 from takopi.utils.paths import reset_run_base_dir, set_run_base_dir
 
 from ..overrides import supports_reasoning
-from ..resume import ResumeLineProxy, should_render_resume_line
+from ..resume import (
+    ResumeLineProxy,
+    should_render_context_line,
+    should_render_resume_line,
+)
 
 if TYPE_CHECKING:
     pass
@@ -194,7 +198,11 @@ async def _run_engine(
             if cwd is not None:
                 run_fields["cwd"] = str(cwd)
             bind_run_context(**run_fields)
-            context_line = runtime.format_context_line(context)
+            context_line = (
+                runtime.format_context_line(context)
+                if should_render_context_line(thread_id=thread_id)
+                else None
+            )
             incoming = RunnerIncomingMessage(
                 channel_id=channel_id,
                 message_id=user_msg_id,

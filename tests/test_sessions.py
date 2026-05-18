@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from takopi_discord.resume import should_render_resume_line
+from takopi_discord.resume import should_render_context_line, should_render_resume_line
 from takopi_discord.sessions import (
     normalize_session_mode,
     session_author_id,
@@ -74,6 +74,14 @@ class TestShouldRenderResumeLine:
             )
             is False
         )
+
+
+class TestShouldRenderContextLine:
+    def test_hides_context_line_inside_discord_thread(self) -> None:
+        assert should_render_context_line(thread_id=42) is False
+
+    def test_shows_context_line_outside_discord_thread(self) -> None:
+        assert should_render_context_line(thread_id=None) is True
 
 
 class TestSessionAuthorId:

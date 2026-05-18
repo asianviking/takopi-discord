@@ -48,7 +48,11 @@ from .overrides import (
 )
 from .prefs import DiscordPrefsStore
 from .render import prepare_discord
-from .resume import ResumeLineProxy, should_render_resume_line
+from .resume import (
+    ResumeLineProxy,
+    should_render_context_line,
+    should_render_resume_line,
+)
 from .sessions import session_author_id, should_resume_session
 from .state import DiscordStateStore
 from .types import DiscordChannelContext, DiscordThreadContext
@@ -492,7 +496,11 @@ def _render_resume_progress(
 ) -> RenderedMessage:
     tracker = ProgressTracker(engine=resume_token.engine)
     tracker.set_resume(resume_token)
-    context_line = cfg.runtime.format_context_line(context)
+    context_line = (
+        cfg.runtime.format_context_line(context)
+        if should_render_context_line(thread_id=thread_id)
+        else None
+    )
     resume_formatter = None
     if should_render_resume_line(
         cfg.session_mode,
@@ -796,7 +804,7 @@ def _extract_engine_id_from_header(text: str | None) -> str | None:
 def _strip_ctx_lines(text: str | None) -> str | None:
     """Strip takopi context lines from bot messages.
 
-    Discord reply-to-continue needs the resume token in the referenced message, but
+    Reply-to-continue may use footer metadata from the referenced bot message, but
     we don't want to couple branching to context-line parsing (which can raise if
     config changes). Removing `ctx:` lines keeps resume extraction reliable.
     """
@@ -1051,8 +1059,11 @@ async def run_main_loop(
                     thread_id=thread_id,
                 )
 
-                # Build context line if we have context
-                context_line = cfg.runtime.format_context_line(context)
+                context_line = (
+                    cfg.runtime.format_context_line(context)
+                    if should_render_context_line(thread_id=thread_id)
+                    else None
+                )
 
                 # Callback to save the resume token when it becomes known
                 async def on_thread_known(

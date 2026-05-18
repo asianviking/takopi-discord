@@ -25,6 +25,7 @@ from .client import DiscordBotClient
 from .loop import run_main_loop
 from .onboarding import check_setup, interactive_setup
 from .allowlist import normalize_user_id_set
+from .sessions import normalize_session_mode
 
 logger = get_logger(__name__)
 
@@ -113,7 +114,25 @@ class DiscordBackend(TransportBackend):
         token = settings["bot_token"]
         guild_id = settings.get("guild_id")
         message_overflow = settings.get("message_overflow", "split")
-        session_mode = settings.get("session_mode", "stateless")
+        session_mode_raw = settings.get("session_mode", "thread")
+        session_mode = normalize_session_mode(session_mode_raw)
+        normalized_session_mode_raw = (
+            session_mode_raw.strip().lower()
+            if isinstance(session_mode_raw, str)
+            else None
+        )
+        if normalized_session_mode_raw not in {"stateless", "thread", "chat"}:
+            logger.warning(
+                "config.invalid_session_mode",
+                value=session_mode_raw,
+                fallback=session_mode,
+            )
+        elif normalized_session_mode_raw == "chat":
+            logger.info(
+                "config.legacy_session_mode",
+                value=session_mode_raw,
+                normalized=session_mode,
+            )
         show_resume_line = settings.get("show_resume_line", True)
         trigger_mode_default_raw = settings.get("trigger_mode_default", "all")
         trigger_mode_default_normalized: str | None = None

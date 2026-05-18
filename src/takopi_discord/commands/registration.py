@@ -16,6 +16,7 @@ from takopi.runners.run_options import EngineRunOptions
 
 from .dispatch import dispatch_command
 from ..allowlist import is_user_allowed
+from ..sessions import session_author_id, should_resume_session
 
 if TYPE_CHECKING:
     from ..bridge import DiscordBridgeConfig
@@ -253,15 +254,44 @@ async def _handle_plugin_command(
 
     message_id = starter_msg.message_id
     session_key = thread_id if thread_id is not None else channel_id
+    scoped_author_id = session_author_id(
+        thread_id=thread_id, author_id=author_id
+    )
 
     async def on_thread_known(new_token: ResumeToken, _event: anyio.Event) -> None:
+        if not should_resume_session(cfg.session_mode, thread_id=thread_id):
+            return
         await state_store.set_session(
             guild_id,
             session_key,
             new_token.engine,
             new_token.value,
-            author_id=author_id,
+            author_id=scoped_author_id,
         )
+        if created_new_thread and thread_id is not None and thread_context is not None:
+            await state_store.set_context(
+                guild_id,
+                thread_id,
+                DiscordThreadContext(
+                    project=thread_context.project,
+                    branch=thread_context.branch,
+                    worktrees_dir=thread_context.worktrees_dir,
+                    default_engine=new_token.engine,
+                ),
+            )
+
+    async def resume_token_resolver(engine_id: EngineId) -> ResumeToken | None:
+        if not should_resume_session(cfg.session_mode, thread_id=thread_id):
+            return None
+        token_str = await state_store.get_session(
+            guild_id,
+            session_key,
+            engine_id,
+            author_id=scoped_author_id,
+        )
+        if token_str is None:
+            return None
+        return ResumeToken(engine=engine_id, value=token_str)
 
     async def run_command_job() -> None:
         handled = await dispatch_command(
@@ -281,6 +311,7 @@ async def _handle_plugin_command(
             default_engine_override=default_engine_override,
             engine_overrides_resolver=engine_overrides_resolver,
             default_context=default_context,
+            resume_token_resolver=resume_token_resolver,
         )
         if not handled:
             await cfg.bot.send_message(

@@ -55,7 +55,7 @@ transport = "discord"
 bot_token = "..."                # Required: Discord bot token
 guild_id = 123456789             # Optional: restrict bot to single server
 message_overflow = "split"       # "split" (default) or "trim" for long messages
-session_mode = "stateless"       # "stateless" (default) or "chat"
+session_mode = "thread"          # "thread" (default) or "stateless"; "chat" aliases "thread"
 show_resume_line = true          # Show resume token in messages (default: true)
 trigger_mode_default = "all"     # "all" (default) or "mentions" for inherited trigger mode
 # allowed_user_ids = [123456789012345678]      # Optional: restrict human bot usage (Discord user IDs)
@@ -80,8 +80,9 @@ whisper_model = "base"
 # voice_transcription_api_key = "local"                      # Optional: key for transcription server
 ```
 
-State is automatically saved to `~/.takopi/discord_state.json`. Chat preferences
-(trigger mode, engine overrides) are stored in `~/.takopi/discord_prefs.json`.
+State is automatically saved to `~/.takopi/discord_state.json`.
+Channel/thread preferences (trigger mode, engine overrides) are stored in
+`~/.takopi/discord_prefs.json`.
 
 ## Setup
 
@@ -192,6 +193,8 @@ Discord thread name is updated to the branch name.
 - Messages in channels automatically create threads
 - Each thread maintains its own session with resume tokens
 - Multiple sessions can run simultaneously across threads
+- `session_mode = "stateless"` disables server-side resume; reply-chain resume
+  still works. Legacy `session_mode = "chat"` is treated the same as `thread`.
 - Progress messages include Discord buttons for cancellation, and queued replies
   can be steered into an active turn when the runner supports it
 - Rate limiting prevents Discord API throttling during high activity

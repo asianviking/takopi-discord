@@ -14,6 +14,7 @@ from takopi.transport import MessageRef, RenderedMessage, SendOptions
 
 from .client import DiscordBotClient
 from .render import MAX_BODY_CHARS, prepare_discord, prepare_discord_multi
+from .sessions import SessionMode
 
 if TYPE_CHECKING:
     from takopi.runner_bridge import ExecBridgeConfig
@@ -212,7 +213,7 @@ class DiscordBridgeConfig:
     exec_cfg: ExecBridgeConfig
     allowed_user_ids: frozenset[int] | None = None
     allowed_bot_user_ids: frozenset[int] | None = None
-    session_mode: Literal["stateless", "chat"] = "stateless"
+    session_mode: SessionMode = "thread"
     show_resume_line: bool = True
     message_overflow: Literal["trim", "split"] = "split"
     trigger_mode_default: Literal["all", "mentions"] = "all"

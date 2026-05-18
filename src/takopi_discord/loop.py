@@ -48,6 +48,7 @@ from .overrides import (
 )
 from .prefs import DiscordPrefsStore
 from .render import prepare_discord
+from .sessions import session_author_id, should_resume_session
 from .state import DiscordStateStore
 from .types import DiscordChannelContext, DiscordThreadContext
 from .voice_messages import WhisperAttachmentTranscriber, is_audio_attachment
@@ -99,6 +100,28 @@ def _apply_resolved_message(
         engine_id = resolved_msg.engine_override
 
     return prompt, engine_id, run_context, resume_token
+
+
+def _build_new_thread_context(
+    *,
+    run_context: RunContext | None,
+    channel_context: DiscordChannelContext | None,
+    engine_id: str,
+) -> DiscordThreadContext | None:
+    if (
+        run_context is None
+        or run_context.project is None
+        or run_context.branch is None
+    ):
+        return None
+    return DiscordThreadContext(
+        project=run_context.project,
+        branch=run_context.branch,
+        worktrees_dir=channel_context.worktrees_dir
+        if channel_context is not None
+        else ".worktrees",
+        default_engine=engine_id,
+    )
 
 
 async def _rename_thread_to_branch(thread: object, branch: str) -> bool:
@@ -280,15 +303,31 @@ async def _dispatch_plugin_component_interaction(
         return None
 
     session_key = thread_id if thread_id is not None else parent_channel_id
+    save_author_id = session_author_id(thread_id=thread_id, author_id=user_id)
 
     async def on_thread_known(new_token: ResumeToken, _event: anyio.Event) -> None:
+        if not should_resume_session(cfg.session_mode, thread_id=thread_id):
+            return
         await state_store.set_session(
             guild_id,
             session_key,
             new_token.engine,
             new_token.value,
-            author_id=user_id,
+            author_id=save_author_id,
         )
+
+    async def resume_token_resolver(engine_id: str) -> ResumeToken | None:
+        if not should_resume_session(cfg.session_mode, thread_id=thread_id):
+            return None
+        token_str = await state_store.get_session(
+            guild_id,
+            session_key,
+            engine_id,
+            author_id=save_author_id,
+        )
+        if token_str is None:
+            return None
+        return ResumeToken(engine=engine_id, value=token_str)
 
     effective_channel_id = thread_id or parent_channel_id
     message_id = interaction.message.id
@@ -312,6 +351,7 @@ async def _dispatch_plugin_component_interaction(
             default_engine_override=default_engine_override,
             engine_overrides_resolver=engine_overrides_resolver,
             default_context=default_context,
+            resume_token_resolver=resume_token_resolver,
         ),
         name=f"takopi-discord:component:{command_id}:{effective_channel_id}",
     )
@@ -447,12 +487,15 @@ def _render_resume_progress(
     resume_token: ResumeToken,
     context: RunContext | None,
     label: str,
+    thread_id: int | None = None,
 ) -> RenderedMessage:
     tracker = ProgressTracker(engine=resume_token.engine)
     tracker.set_resume(resume_token)
     context_line = cfg.runtime.format_context_line(context)
     resume_formatter = None
-    if cfg.show_resume_line or cfg.session_mode != "chat":
+    if cfg.show_resume_line or not should_resume_session(
+        cfg.session_mode, thread_id=thread_id
+    ):
         resume_formatter = cfg.runtime.resolve_runner(
             resume_token=resume_token,
             engine_override=None,
@@ -481,6 +524,7 @@ async def _edit_queued_progress(
         resume_token=job.resume_token,
         context=job.context,
         label=label,
+        thread_id=cast(int | None, job.thread_id),
     )
     await cfg.exec_cfg.transport.edit(
         ref=MessageRef(
@@ -507,6 +551,7 @@ async def _send_queued_progress(
         resume_token=resume_token,
         context=context,
         label="queued" if steerable else "starting",
+        thread_id=thread_id,
     )
     reply_ref = MessageRef(
         channel_id=channel_id,
@@ -1012,22 +1057,28 @@ async def run_main_loop(
                         if len(new_token.value) > 20
                         else new_token.value,
                     )
-                    # Save to thread_id if present, otherwise channel_id
-                    # This matches the retrieval logic in handle_message
                     save_key = thread_id if thread_id else channel_id
-                    await _save_session_token(
-                        state_store=state_store,
-                        guild_id=guild_id,
-                        session_key=save_key,
-                        author_id=author_id,
-                        token=new_token,
+                    save_author_id = session_author_id(
+                        thread_id=thread_id, author_id=author_id
                     )
-                    if state_store and guild_id:
+                    if should_resume_session(cfg.session_mode, thread_id=thread_id):
+                        await _save_session_token(
+                            state_store=state_store,
+                            guild_id=guild_id,
+                            session_key=save_key,
+                            author_id=save_author_id,
+                            token=new_token,
+                        )
+                    if (
+                        state_store
+                        and guild_id
+                        and should_resume_session(cfg.session_mode, thread_id=thread_id)
+                    ):
                         logger.info(
                             "session.saved",
                             guild_id=guild_id,
                             session_key=save_key,
-                            author_id=author_id,
+                            author_id=save_author_id,
                             engine_id=new_token.engine,
                         )
                     else:
@@ -1677,45 +1728,36 @@ async def run_main_loop(
                 source="reply" if reply_text else "message",
             )
 
-        if (
-            is_new_thread
-            and branch_override is None
-            and thread_id is not None
-            and state_store is not None
-            and guild_id is not None
-            and resolved_msg is not None
-            and resolved_msg.context is not None
-            and resolved_msg.context.project is not None
-            and resolved_msg.context.branch is not None
-        ):
-            default_engine = cfg.runtime.resolve_engine(
-                engine_override=resolved_msg.engine_override,
-                context=resolved_msg.context,
+        if is_new_thread and thread_id is not None and state_store and guild_id:
+            new_thread_context = _build_new_thread_context(
+                run_context=run_context,
+                channel_context=channel_context,
+                engine_id=engine_id,
             )
-            await state_store.set_context(
-                guild_id,
-                thread_id,
-                DiscordThreadContext(
-                    project=resolved_msg.context.project,
-                    branch=resolved_msg.context.branch,
-                    worktrees_dir=channel_context.worktrees_dir
-                    if channel_context is not None
-                    else ".worktrees",
-                    default_engine=default_engine,
-                ),
-            )
+            if new_thread_context is not None:
+                await state_store.set_context(guild_id, thread_id, new_thread_context)
+                logger.info(
+                    "thread.context_saved",
+                    thread_id=thread_id,
+                    project=new_thread_context.project,
+                    branch=new_thread_context.branch,
+                    default_engine=new_thread_context.default_engine,
+                )
 
         if (
             resume_token is None
             and state_store
             and guild_id
-            and cfg.session_mode == "chat"
+            and should_resume_session(cfg.session_mode, thread_id=thread_id)
         ):
+            lookup_author_id = session_author_id(
+                thread_id=thread_id, author_id=author_id
+            )
             token_str = await state_store.get_session(
                 guild_id,
                 session_key,
                 engine_id,
-                author_id=author_id,
+                author_id=lookup_author_id,
             )
             if token_str:
                 resume_token = ResumeToken(engine=engine_id, value=token_str)
@@ -1723,7 +1765,7 @@ async def run_main_loop(
                     "session.restored",
                     guild_id=guild_id,
                     session_key=session_key,
-                    author_id=author_id,
+                    author_id=lookup_author_id,
                     engine_id=engine_id,
                     token_preview=token_str[:20] + "..."
                     if len(token_str) > 20
@@ -1734,7 +1776,7 @@ async def run_main_loop(
                     "session.not_found",
                     guild_id=guild_id,
                     session_key=session_key,
-                    author_id=author_id,
+                    author_id=lookup_author_id,
                     engine_id=engine_id,
                 )
 
@@ -1905,9 +1947,12 @@ async def run_main_loop(
         # current task's resume token is ready, then executed with full context.
         # Also queue any message that resumes an existing thread to avoid
         # overlapping runs for the same conversation.
+        scoped_author_id = session_author_id(
+            thread_id=thread_id, author_id=author_id
+        )
         session_meta: tuple[int, int | None] | tuple[int, int | None, int] = (
-            (guild_id, channel_id, author_id)
-            if author_id is not None
+            (guild_id, channel_id, scoped_author_id)
+            if scoped_author_id is not None
             else (guild_id, channel_id)
         )
         if resume_resolver is not None:
@@ -2171,7 +2216,11 @@ async def run_main_loop(
                 # Get resume token for the text channel
                 resume_token: ResumeToken | None = None
                 engine_id = cfg.runtime.default_engine or "claude"
-                if cfg.session_mode == "chat":
+                text_thread_id = None
+                text_context = await state_store.get_context(guild_id, text_channel_id)
+                if isinstance(text_context, DiscordThreadContext):
+                    text_thread_id = text_channel_id
+                if should_resume_session(cfg.session_mode, thread_id=text_thread_id):
                     token_str = await state_store.get_session(
                         guild_id, text_channel_id, engine_id
                     )
@@ -2191,7 +2240,7 @@ async def run_main_loop(
                     resume_token=resume_token,
                     context=run_context,
                     engine_id=engine_id,
-                    thread_id=None,
+                    thread_id=text_thread_id,
                     reply_ref=None,
                     guild_id=guild_id,
                 )

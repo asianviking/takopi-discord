@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from takopi.context import RunContext
+from takopi.model import ResumeToken
 
 from takopi_discord.commands.registration import (
     _format_plugin_starter_message,
@@ -106,6 +107,8 @@ async def test_plugin_command_in_bound_channel_creates_thread(
         )
     )
     state_store.set_context = AsyncMock()
+    state_store.get_session = AsyncMock(return_value="tok-thread")
+    state_store.set_session = AsyncMock()
 
     prefs_store = MagicMock()
 
@@ -147,6 +150,25 @@ async def test_plugin_command_in_bound_channel_creates_thread(
     assert kwargs["default_context"] == RunContext(
         project="takopi-discord",
         branch="main",
+    )
+    token = await kwargs["resume_token_resolver"]("codex")
+    assert token == ResumeToken(engine="codex", value="tok-thread")
+    state_store.get_session.assert_awaited_once_with(
+        1, 99, "codex", author_id=None
+    )
+    await kwargs["on_thread_known"](ResumeToken(engine="codex", value="tok-new"), None)
+    state_store.set_session.assert_awaited_once_with(
+        1, 99, "codex", "tok-new", author_id=None
+    )
+    state_store.set_context.assert_any_await(
+        1,
+        99,
+        DiscordThreadContext(
+            project="takopi-discord",
+            branch="main",
+            worktrees_dir=".worktrees",
+            default_engine="codex",
+        ),
     )
     ctx.followup.send.assert_awaited_once()
     assert "<#99>" in ctx.followup.send.call_args.args[0]

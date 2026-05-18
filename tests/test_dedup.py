@@ -51,9 +51,17 @@ class _FakeProgressPresenter:
         )
 
 
+class _FakeRunner:
+    def format_resume(self, token: ResumeToken) -> str:
+        return f"resume:{token.engine}:{token.value}"
+
+
 class _FakeRuntime:
     def format_context_line(self, context):
         return None
+
+    def resolve_runner(self, *, resume_token, engine_override):
+        return SimpleNamespace(runner=_FakeRunner())
 
 
 def test_presenter_queued_shows_steer_and_cancel() -> None:
@@ -106,7 +114,7 @@ async def test_send_queued_progress_only_marks_steerable_when_busy() -> None:
             transport=transport,
         ),
         show_resume_line=False,
-        session_mode="chat",
+        session_mode="thread",
     )
     resume = ResumeToken(engine="codex", value="resume-token")
 
@@ -145,7 +153,7 @@ async def test_edit_queued_progress_clears_buttons_when_cancelled() -> None:
             transport=transport,
         ),
         show_resume_line=False,
-        session_mode="chat",
+        session_mode="thread",
     )
     job = ThreadJob(
         chat_id=1,

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 import discord
 
 from .allowlist import is_user_allowed
+from .sessions import session_author_id, should_resume_session
 from .overrides import (
     allowed_reasoning_levels,
     is_valid_reasoning_level,
@@ -555,11 +556,17 @@ def register_slash_commands(
 
         channel_id = ctx.channel_id
         guild_id = ctx.guild.id
+        thread_id = ctx.channel_id if isinstance(ctx.channel, discord.Thread) else None
 
         author_id = getattr(getattr(ctx, "author", None), "id", None)
         if not isinstance(author_id, int):
             author_id = None
-        await state_store.clear_sessions(guild_id, channel_id, author_id=author_id)
+        scoped_author_id = session_author_id(
+            thread_id=thread_id, author_id=author_id
+        )
+        await state_store.clear_sessions(
+            guild_id, channel_id, author_id=scoped_author_id
+        )
         await ctx.respond("Session cleared. Starting fresh.", ephemeral=True)
 
     @pycord_bot.slash_command(name="ctx", description="Show or manage context binding")
@@ -1578,12 +1585,15 @@ async def _handle_engine_command(
     if not isinstance(author_id, int):
         author_id = None
     session_key = thread_id if thread_id is not None else channel_id
-    if cfg.session_mode == "chat":
+    scoped_author_id = session_author_id(
+        thread_id=thread_id, author_id=author_id
+    )
+    if should_resume_session(cfg.session_mode, thread_id=thread_id):
         token_str = await state_store.get_session(
             guild_id,
             session_key,
             engine_id,
-            author_id=author_id,
+            author_id=scoped_author_id,
         )
         if token_str:
             resume_token = ResumeToken(engine=engine_id, value=token_str)
@@ -1598,18 +1608,20 @@ async def _handle_engine_command(
     )
 
     async def on_thread_known(new_token: ResumeToken, _event: anyio.Event) -> None:
+        if not should_resume_session(cfg.session_mode, thread_id=thread_id):
+            return
         await state_store.set_session(
             guild_id,
             session_key,
             engine_id,
             new_token.value,
-            author_id=author_id,
+            author_id=scoped_author_id,
         )
         logger.info(
             "engine_command.session_saved",
             guild_id=guild_id,
             session_key=session_key,
-            author_id=author_id,
+            author_id=scoped_author_id,
             engine=engine_id,
         )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 import anyio
 
@@ -23,6 +23,7 @@ from takopi.transport_runtime import TransportRuntime
 from takopi.utils.paths import reset_run_base_dir, set_run_base_dir
 
 from ..overrides import supports_reasoning
+from ..sessions import should_resume_session
 
 if TYPE_CHECKING:
     pass
@@ -157,7 +158,7 @@ async def _run_engine(
     engine_override: EngineId | None = None,
     thread_id: int | None = None,
     show_resume_line: bool = True,
-    session_mode: Literal["stateless", "chat"] = "stateless",
+    session_mode: str = "thread",
     run_options: EngineRunOptions | None = None,
 ) -> None:
     """Run an engine request."""
@@ -167,7 +168,9 @@ async def _run_engine(
             engine_override=engine_override,
         )
         runner: Runner = entry.runner
-        effective_show_resume_line = show_resume_line or session_mode != "chat"
+        effective_show_resume_line = show_resume_line or not should_resume_session(
+            session_mode, thread_id=thread_id
+        )
         if not effective_show_resume_line:
             runner = cast(Runner, _ResumeLineProxy(runner))
         warning = _reasoning_warning(engine=runner.engine, run_options=run_options)
@@ -254,6 +257,8 @@ class _DiscordCommandExecutor(CommandExecutor):
         runtime: TransportRuntime,
         running_tasks: RunningTasks,
         on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
+        resume_token_resolver: Callable[[EngineId], Awaitable[ResumeToken | None]]
+        | None,
         engine_overrides_resolver: Callable[
             [EngineId], Awaitable[EngineRunOptions | None]
         ]
@@ -263,7 +268,7 @@ class _DiscordCommandExecutor(CommandExecutor):
         thread_id: int | None,
         guild_id: int | None,
         show_resume_line: bool,
-        session_mode: Literal["stateless", "chat"] = "stateless",
+        session_mode: str = "thread",
         default_engine_override: EngineId | None,
         default_context: RunContext | None = None,
     ) -> None:
@@ -271,6 +276,7 @@ class _DiscordCommandExecutor(CommandExecutor):
         self._runtime = runtime
         self._running_tasks = running_tasks
         self._on_thread_known = on_thread_known
+        self._resume_token_resolver = resume_token_resolver
         self._engine_overrides_resolver = engine_overrides_resolver
         self._channel_id = channel_id
         self._user_msg_id = user_msg_id
@@ -346,6 +352,9 @@ class _DiscordCommandExecutor(CommandExecutor):
         run_options = None
         if self._engine_overrides_resolver is not None:
             run_options = await self._engine_overrides_resolver(engine)
+        resume_token = None
+        if self._resume_token_resolver is not None:
+            resume_token = await self._resume_token_resolver(engine)
 
         if mode == "capture":
             capture = _CaptureTransport()
@@ -361,7 +370,7 @@ class _DiscordCommandExecutor(CommandExecutor):
                 channel_id=self._channel_id,
                 user_msg_id=self._user_msg_id,
                 text=request.prompt,
-                resume_token=None,
+                resume_token=resume_token,
                 context=request.context,
                 reply_ref=self._reply_ref,
                 on_thread_known=self._on_thread_known,
@@ -380,7 +389,7 @@ class _DiscordCommandExecutor(CommandExecutor):
             channel_id=self._channel_id,
             user_msg_id=self._user_msg_id,
             text=request.prompt,
-            resume_token=None,
+            resume_token=resume_token,
             context=request.context,
             reply_ref=self._reply_ref,
             on_thread_known=self._on_thread_known,

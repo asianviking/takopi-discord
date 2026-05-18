@@ -11,6 +11,7 @@ from takopi.model import ResumeToken
 from takopi.transport_runtime import ResolvedMessage
 from takopi_discord.loop import (
     _apply_resolved_message,
+    _build_new_thread_context,
     _dispatch_plugin_component_interaction,
     _extract_engine_id_from_header,
     _maybe_update_thread_context_from_directives,
@@ -116,6 +117,37 @@ def test_apply_resolved_message_annotates_voice_after_directives_are_removed() -
     )
 
     assert prompt == "(voice transcribed) fix it"
+
+
+def test_build_new_thread_context_uses_first_turn_engine() -> None:
+    context = _build_new_thread_context(
+        run_context=RunContext(project="dakopi", branch="main"),
+        channel_context=DiscordChannelContext(
+            project="dakopi",
+            worktrees_dir=".worktrees",
+            default_engine="claude",
+            worktree_base="main",
+        ),
+        engine_id="codex",
+    )
+
+    assert context == DiscordThreadContext(
+        project="dakopi",
+        branch="main",
+        worktrees_dir=".worktrees",
+        default_engine="codex",
+    )
+
+
+def test_build_new_thread_context_requires_project_and_branch() -> None:
+    assert (
+        _build_new_thread_context(
+            run_context=RunContext(project="dakopi", branch=None),
+            channel_context=None,
+            engine_id="codex",
+        )
+        is None
+    )
 
 
 def test_parse_plugin_component_custom_id_supports_telegram_shape() -> None:

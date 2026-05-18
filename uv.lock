@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.14"
 
 [[package]]
@@ -839,7 +839,7 @@ wheels = [
 
 [[package]]
 name = "takopi"
-version = "0.21.0"
+version = "0.23.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -857,9 +857,9 @@ dependencies = [
     { name = "typer" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d1/83/4a436471f9756e3a7368deed86dbf1ea0dec1d43fb12d23ebae4239be1c4/takopi-0.21.0.tar.gz", hash = "sha256:0ca725d6acd203bca6b9960e0aa9e1058573d8cfcda8c9e5dd1f8fee7a3d3f6e", size = 119476, upload-time = "2026-01-16T21:29:10.154Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/9c/0cb3cb4de8c0e275812f1063207a8536983aceccaf22baa537c828337860/takopi-0.23.3.tar.gz", hash = "sha256:34222aef09e0d6991a8fe0ea86e723c32e99f69b2a0894ff193db26293a25603", size = 129603, upload-time = "2026-05-15T22:41:09.706Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b0/fb/b6e2062c7952d3ffb3bcc564d552c60f19b7227537e5ae36db2894a1c02c/takopi-0.21.0-py3-none-any.whl", hash = "sha256:16624dbd73fd2eb5200eadafb4eeafef9337706c373c3fb06846203b65b51ba1", size = 165696, upload-time = "2026-01-16T21:29:08.622Z" },
+    { url = "https://files.pythonhosted.org/packages/33/8f/072ff10360080f39d13f82d0c3558be591d25e1beee3961986b5f8040786/takopi-0.23.3-py3-none-any.whl", hash = "sha256:344d2d3743012f1df2b7a04fcd862fc316bcaeb50c3617273231d5242cd004f1", size = 175079, upload-time = "2026-05-15T22:41:08.122Z" },
 ]
 
 [[package]]
@@ -885,7 +885,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.0.0" },
     { name = "py-cord", specifier = ">=2.6.0" },
     { name = "pywhispercpp", specifier = ">=1.4.0" },
-    { name = "takopi", specifier = ">=0.18.0" },
+    { name = "takopi", specifier = ">=0.23.3" },
 ]
 
 [package.metadata.requires-dev]

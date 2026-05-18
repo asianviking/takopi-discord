@@ -20,13 +20,13 @@ class DummyThread:
         self.parent_id = parent_id
 
 
-@pytest.mark.anyio
-async def test_engine_command_restores_and_saves_session_in_thread(
+def _build_thread_ctx(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    session_mode: str,
+) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
     import takopi_discord.handlers as handlers
 
-    # Make isinstance(ctx.channel, discord.Thread) work without real discord objects.
     monkeypatch.setattr(handlers.discord, "Thread", DummyThread)
 
     ctx = MagicMock()
@@ -47,15 +47,32 @@ async def test_engine_command_restores_and_saves_session_in_thread(
 
     prefs_store = MagicMock()
 
-    # Starter message mock
     starter_ref = MessageRef(channel_id=555, message_id=777, thread_id=555)
     cfg = MagicMock()
     cfg.exec_cfg = MagicMock()
     cfg.runtime = MagicMock()
     cfg.show_resume_line = True
     cfg.allowed_user_ids = None
-    cfg.session_mode = "chat"
+    cfg.session_mode = session_mode
     cfg.bot.send_message = AsyncMock(return_value=starter_ref)
+
+    return ctx, state_store, prefs_store, cfg
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("session_mode", ["chat", "thread"])
+async def test_engine_command_restores_and_saves_session_in_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    session_mode: str,
+) -> None:
+    """Under canonical ``thread`` mode and legacy ``chat`` alias, the thread
+    resumes and saves with ``author_id=None`` — a thread is one shared session.
+    """
+    import takopi_discord.handlers as handlers
+
+    ctx, state_store, prefs_store, cfg = _build_thread_ctx(
+        monkeypatch, session_mode=session_mode
+    )
 
     run_engine = AsyncMock()
 
@@ -76,11 +93,10 @@ async def test_engine_command_restores_and_saves_session_in_thread(
             running_tasks={},
         )
 
-        # Let the background task run
         await asyncio.sleep(0)
 
         state_store.get_session.assert_awaited_once_with(
-            123, 555, "codex", author_id=4242
+            123, 555, "codex", author_id=None
         )
         run_engine.assert_awaited_once()
 
@@ -96,5 +112,46 @@ async def test_engine_command_restores_and_saves_session_in_thread(
             ResumeToken(engine="codex", value="tok456"), anyio.Event()
         )
         state_store.set_session.assert_awaited_with(
-            123, 555, "codex", "tok456", author_id=4242
+            123, 555, "codex", "tok456", author_id=None
         )
+
+
+@pytest.mark.anyio
+async def test_engine_command_stateless_thread_skips_server_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``session_mode = "stateless"`` skips server-side resume even in a thread.
+
+    Reply-chain resume (visible resume line + reply parsing) still works at
+    every scope — that's orthogonal to this setting.
+    """
+    import takopi_discord.handlers as handlers
+
+    ctx, state_store, prefs_store, cfg = _build_thread_ctx(
+        monkeypatch, session_mode="stateless"
+    )
+
+    run_engine = AsyncMock()
+
+    with (
+        patch(
+            "takopi_discord.handlers.resolve_overrides",
+            new=AsyncMock(return_value=ResolvedOverrides()),
+        ),
+        patch("takopi_discord.commands.executor._run_engine", new=run_engine),
+    ):
+        await handlers._handle_engine_command(
+            ctx,
+            engine_id="codex",
+            prompt="hello",
+            cfg=cfg,
+            state_store=state_store,
+            prefs_store=prefs_store,
+            running_tasks={},
+        )
+
+        await asyncio.sleep(0)
+
+        state_store.get_session.assert_not_awaited()
+        run_engine.assert_awaited_once()
+        assert run_engine.call_args.kwargs["resume_token"] is None

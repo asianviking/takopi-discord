@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -12,6 +14,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from openai import AsyncOpenAI
 from pywhispercpp.model import Model as WhisperModel
 
 if TYPE_CHECKING:
@@ -74,8 +77,16 @@ def _combine_whisper_segments(segments: Iterable[object]) -> str:
 class WhisperAttachmentTranscriber:
     """Transcribes audio attachments using local Whisper (pywhispercpp)."""
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
         self._model_name = model_name
+        self._base_url = base_url
+        self._api_key = api_key
         self._model: WhisperModel | None = None
         self._lock = asyncio.Lock()
 
@@ -133,7 +144,29 @@ class WhisperAttachmentTranscriber:
         """Transcribe audio bytes into text."""
         if not payload:
             return ""
+        if self._base_url is not None:
+            return await self._transcribe_remote(payload, suffix=suffix)
         async with self._lock:
             return await asyncio.to_thread(
                 self._transcribe_sync, payload, suffix=suffix
             )
+
+    async def _transcribe_remote(self, payload: bytes, *, suffix: str) -> str:
+        api_key = self._api_key or os.environ.get("OPENAI_API_KEY") or "local"
+        client = AsyncOpenAI(api_key=api_key, base_url=self._base_url)
+        filename = "voice" + (suffix if suffix.startswith(".") else f".{suffix}")
+        try:
+            result = await client.audio.transcriptions.create(
+                model=self._model_name,
+                file=(filename, io.BytesIO(payload)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "voice_messages.remote_transcribe_failed: %s (%s)",
+                str(exc),
+                exc.__class__.__name__,
+            )
+            return ""
+
+        text = getattr(result, "text", "")
+        return text.strip() if isinstance(text, str) else ""

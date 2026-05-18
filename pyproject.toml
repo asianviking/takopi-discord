@@ -9,7 +9,7 @@ requires-python = ">=3.14"
 dependencies = [
     "py-cord>=2.6.0",
     "openai>=1.0.0",
-    "takopi>=0.18.0",
+    "takopi>=0.23.3",
     "pywhispercpp>=1.4.0",
 ]
 classifiers = [

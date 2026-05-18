@@ -14,6 +14,7 @@ from takopi.transport import MessageRef, RenderedMessage, SendOptions
 
 from .client import DiscordBotClient
 from .render import MAX_BODY_CHARS, prepare_discord, prepare_discord_multi
+from .sessions import SessionMode
 
 if TYPE_CHECKING:
     from takopi.runner_bridge import ExecBridgeConfig
@@ -28,6 +29,7 @@ __all__ = [
 ]
 
 CANCEL_BUTTON_ID = "takopi-discord:cancel"
+STEER_BUTTON_ID = "takopi-discord:steer"
 
 
 class CancelView(discord.ui.View):
@@ -36,6 +38,39 @@ class CancelView(discord.ui.View):
     def __init__(self, *, on_cancel: callable | None = None) -> None:
         super().__init__(timeout=None)
         self._on_cancel = on_cancel
+
+    @discord.ui.button(
+        label="cancel", style=discord.ButtonStyle.secondary, custom_id=CANCEL_BUTTON_ID
+    )
+    async def cancel_button(
+        self, button: discord.ui.Button, interaction: discord.Interaction
+    ) -> None:
+        if self._on_cancel is not None:
+            await self._on_cancel(interaction)
+        else:
+            await interaction.response.defer()
+
+
+class SteerCancelView(discord.ui.View):
+    """View with steer and cancel buttons for queued jobs."""
+
+    def __init__(
+        self, *, on_steer: callable | None = None, on_cancel: callable | None = None
+    ) -> None:
+        super().__init__(timeout=None)
+        self._on_steer = on_steer
+        self._on_cancel = on_cancel
+
+    @discord.ui.button(
+        label="steer", style=discord.ButtonStyle.primary, custom_id=STEER_BUTTON_ID
+    )
+    async def steer_button(
+        self, button: discord.ui.Button, interaction: discord.Interaction
+    ) -> None:
+        if self._on_steer is not None:
+            await self._on_steer(interaction)
+        else:
+            await interaction.response.defer()
 
     @discord.ui.button(
         label="cancel", style=discord.ButtonStyle.secondary, custom_id=CANCEL_BUTTON_ID
@@ -80,11 +115,21 @@ class DiscordPresenter:
             state, elapsed_s=elapsed_s, label=label
         )
         text = prepare_discord(parts)
-        is_cancelled = _is_cancelled_label(label)
+        normalized = _normalized_progress_label(label)
+        if normalized in {"cancelled", "steered"}:
+            show_cancel = False
+            show_steer = False
+        elif normalized == "queued":
+            show_cancel = True
+            show_steer = True
+        else:
+            show_cancel = True
+            show_steer = False
         return RenderedMessage(
             text=text,
             extra={
-                "show_cancel": not is_cancelled,
+                "show_cancel": show_cancel,
+                "show_steer": show_steer,
             },
         )
 
@@ -115,11 +160,15 @@ class DiscordPresenter:
         return RenderedMessage(text=text, extra={"show_cancel": False})
 
 
-def _is_cancelled_label(label: str) -> bool:
+def _normalized_progress_label(label: str) -> str:
     stripped = label.strip()
     if stripped.startswith("`") and stripped.endswith("`") and len(stripped) >= 2:
         stripped = stripped[1:-1]
-    return stripped.lower() == "cancelled"
+    return stripped.lower()
+
+
+def _is_terminal_progress_label(label: str) -> bool:
+    return _normalized_progress_label(label) in {"cancelled", "steered"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,8 +185,8 @@ class DiscordFilesSettings:
         ".git/**",
         ".env",
         ".envrc",
-        "**/*.pem",
-        "**/.ssh/**",
+        "*.pem",
+        ".ssh/**",
     )
     allowed_user_ids: frozenset[int] | None = None
 
@@ -149,6 +198,8 @@ class DiscordVoiceMessageSettings:
     enabled: bool = False
     max_bytes: int = 10 * 1024 * 1024  # 10MB
     whisper_model: str = "base"
+    voice_transcription_base_url: str | None = None
+    voice_transcription_api_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +213,7 @@ class DiscordBridgeConfig:
     exec_cfg: ExecBridgeConfig
     allowed_user_ids: frozenset[int] | None = None
     allowed_bot_user_ids: frozenset[int] | None = None
-    session_mode: Literal["stateless", "chat"] = "stateless"
+    session_mode: SessionMode = "thread"
     show_resume_line: bool = True
     message_overflow: Literal["trim", "split"] = "split"
     trigger_mode_default: Literal["all", "mentions"] = "all"
@@ -183,6 +234,7 @@ class DiscordTransport:
     def __init__(self, bot: DiscordBotClient) -> None:
         self._bot = bot
         self._cancel_handlers: dict[int, callable] = {}  # message_id -> handler
+        self._steer_handlers: dict[int, callable] = {}  # message_id -> handler
         self._message_listeners: dict[
             int, MessageListener
         ] = {}  # channel_id -> listener
@@ -203,12 +255,31 @@ class DiscordTransport:
         """Unregister a cancel handler."""
         self._cancel_handlers.pop(message_id, None)
 
+    def register_steer_handler(self, message_id: int, handler: callable) -> None:
+        """Register a steer handler for a message."""
+        self._steer_handlers[message_id] = handler
+
+    def unregister_steer_handler(self, message_id: int) -> None:
+        """Unregister a steer handler."""
+        self._steer_handlers.pop(message_id, None)
+
     async def handle_cancel_interaction(self, interaction: discord.Interaction) -> None:
         """Handle a cancel button interaction."""
         if interaction.message is None:
             await interaction.response.defer()
             return
         handler = self._cancel_handlers.get(interaction.message.id)
+        if handler is not None:
+            await handler(interaction)
+        else:
+            await interaction.response.defer()
+
+    async def handle_steer_interaction(self, interaction: discord.Interaction) -> None:
+        """Handle a steer button interaction."""
+        if interaction.message is None:
+            await interaction.response.defer()
+            return
+        handler = self._steer_handlers.get(interaction.message.id)
         if handler is not None:
             await handler(interaction)
         else:
@@ -231,7 +302,13 @@ class DiscordTransport:
     ) -> None:
         for followup in followups:
             show_cancel = followup.extra.get("show_cancel", False)
-            view = CancelView() if show_cancel else ClearView()
+            show_steer = followup.extra.get("show_steer", False)
+            if show_steer and show_cancel:
+                view = SteerCancelView()
+            elif show_cancel:
+                view = CancelView()
+            else:
+                view = ClearView()
             await self._bot.send_message(
                 channel_id=channel_id,
                 content=followup.text,
@@ -269,7 +346,13 @@ class DiscordTransport:
             )
 
         show_cancel = message.extra.get("show_cancel", False)
-        view = CancelView() if show_cancel else ClearView()
+        show_steer = message.extra.get("show_steer", False)
+        if show_steer and show_cancel:
+            view = SteerCancelView()
+        elif show_cancel:
+            view = CancelView()
+        else:
+            view = ClearView()
 
         followups = self._extract_followups(message)
         sent = await self._bot.send_message(
@@ -321,7 +404,13 @@ class DiscordTransport:
         message_id = cast(int, ref.message_id)
 
         show_cancel = message.extra.get("show_cancel", False)
-        view = CancelView() if show_cancel else ClearView()
+        show_steer = message.extra.get("show_steer", False)
+        if show_steer and show_cancel:
+            view = SteerCancelView()
+        elif show_cancel:
+            view = CancelView()
+        else:
+            view = ClearView()
 
         followups = self._extract_followups(message)
         edited = await self._bot.edit_message(

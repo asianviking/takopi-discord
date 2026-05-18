@@ -12,7 +12,7 @@ from takopi.commands import CommandExecutor, RunMode, RunRequest, RunResult
 from takopi.config import ConfigError
 from takopi.context import RunContext
 from takopi.logging import bind_run_context, clear_context, get_logger
-from takopi.model import EngineId, ResumeToken
+from takopi.model import Action, ActionEvent, EngineId, ResumeToken, TakopiEvent
 from takopi.runner import Runner
 from takopi.runner_bridge import ExecBridgeConfig, RunningTasks
 from takopi.runner_bridge import IncomingMessage as RunnerIncomingMessage
@@ -22,6 +22,13 @@ from takopi.transport import MessageRef, RenderedMessage, SendOptions
 from takopi.transport_runtime import TransportRuntime
 from takopi.utils.paths import reset_run_base_dir, set_run_base_dir
 
+from ..overrides import supports_reasoning
+from ..resume import (
+    ResumeLineProxy,
+    should_render_context_line,
+    should_render_resume_line,
+)
+
 if TYPE_CHECKING:
     pass
 
@@ -29,10 +36,11 @@ logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
-class _ResumeLineProxy:
-    """Proxy runner that suppresses resume line output."""
+class _PreludeRunner:
+    """Proxy runner that emits prelude events before the real runner."""
 
     runner: Runner
+    prelude_events: Sequence[TakopiEvent]
 
     @property
     def engine(self) -> str:
@@ -41,14 +49,41 @@ class _ResumeLineProxy:
     def is_resume_line(self, line: str) -> bool:
         return self.runner.is_resume_line(line)
 
-    def format_resume(self, _: ResumeToken) -> str:
-        return ""
+    def format_resume(self, token: ResumeToken) -> str:
+        return self.runner.format_resume(token)
 
     def extract_resume(self, text: str | None) -> ResumeToken | None:
         return self.runner.extract_resume(text)
 
-    def run(self, prompt: str, resume: ResumeToken | None):
-        return self.runner.run(prompt, resume)
+    async def run(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> anyio.AsyncIterator[TakopiEvent]:
+        for event in self.prelude_events:
+            yield event
+        async for event in self.runner.run(prompt, resume):
+            yield event
+
+
+def _reasoning_warning(
+    *, engine: str, run_options: EngineRunOptions | None
+) -> TakopiEvent | None:
+    if run_options is None or not run_options.reasoning:
+        return None
+    if supports_reasoning(engine):
+        return None
+    message = f"reasoning override is not supported for `{engine}`; ignoring."
+    return ActionEvent(
+        engine=engine,
+        action=Action(
+            id=f"{engine}.override.reasoning",
+            kind="note",
+            title=message,
+            detail={},
+        ),
+        phase="completed",
+        ok=True,
+        message=message,
+    )
 
 
 class _CaptureTransport:
@@ -104,6 +139,7 @@ async def _run_engine(
     engine_override: EngineId | None = None,
     thread_id: int | None = None,
     show_resume_line: bool = True,
+    session_mode: str = "thread",
     run_options: EngineRunOptions | None = None,
 ) -> None:
     """Run an engine request."""
@@ -113,8 +149,16 @@ async def _run_engine(
             engine_override=engine_override,
         )
         runner: Runner = entry.runner
-        if not show_resume_line:
-            runner = cast(Runner, _ResumeLineProxy(runner))
+        effective_show_resume_line = should_render_resume_line(
+            session_mode,
+            thread_id=thread_id,
+            show_resume_line=show_resume_line,
+        )
+        if not effective_show_resume_line:
+            runner = cast(Runner, ResumeLineProxy(runner))
+        warning = _reasoning_warning(engine=runner.engine, run_options=run_options)
+        if warning is not None:
+            runner = cast(Runner, _PreludeRunner(runner, [warning]))
         if not entry.available:
             reason = entry.issue or "engine unavailable"
             await exec_cfg.transport.send(
@@ -154,7 +198,11 @@ async def _run_engine(
             if cwd is not None:
                 run_fields["cwd"] = str(cwd)
             bind_run_context(**run_fields)
-            context_line = runtime.format_context_line(context)
+            context_line = (
+                runtime.format_context_line(context)
+                if should_render_context_line(thread_id=thread_id)
+                else None
+            )
             incoming = RunnerIncomingMessage(
                 channel_id=channel_id,
                 message_id=user_msg_id,
@@ -196,6 +244,8 @@ class _DiscordCommandExecutor(CommandExecutor):
         runtime: TransportRuntime,
         running_tasks: RunningTasks,
         on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
+        resume_token_resolver: Callable[[EngineId], Awaitable[ResumeToken | None]]
+        | None,
         engine_overrides_resolver: Callable[
             [EngineId], Awaitable[EngineRunOptions | None]
         ]
@@ -205,19 +255,24 @@ class _DiscordCommandExecutor(CommandExecutor):
         thread_id: int | None,
         guild_id: int | None,
         show_resume_line: bool,
+        session_mode: str = "thread",
         default_engine_override: EngineId | None,
+        default_context: RunContext | None = None,
     ) -> None:
         self._exec_cfg = exec_cfg
         self._runtime = runtime
         self._running_tasks = running_tasks
         self._on_thread_known = on_thread_known
+        self._resume_token_resolver = resume_token_resolver
         self._engine_overrides_resolver = engine_overrides_resolver
         self._channel_id = channel_id
         self._user_msg_id = user_msg_id
         self._thread_id = thread_id
         self._guild_id = guild_id
         self._show_resume_line = show_resume_line
+        self._session_mode = session_mode
         self._default_engine_override = default_engine_override
+        self._default_context = default_context
         self._reply_ref = MessageRef(
             channel_id=channel_id,
             message_id=user_msg_id,
@@ -227,7 +282,9 @@ class _DiscordCommandExecutor(CommandExecutor):
     def _apply_default_context(self, request: RunRequest) -> RunRequest:
         if request.context is not None:
             return request
-        context = self._runtime.default_context_for_chat(self._channel_id)
+        context = self._default_context
+        if context is None:
+            context = self._runtime.default_context_for_chat(self._channel_id)
         if context is None:
             return request
         return RunRequest(
@@ -282,6 +339,9 @@ class _DiscordCommandExecutor(CommandExecutor):
         run_options = None
         if self._engine_overrides_resolver is not None:
             run_options = await self._engine_overrides_resolver(engine)
+        resume_token = None
+        if self._resume_token_resolver is not None:
+            resume_token = await self._resume_token_resolver(engine)
 
         if mode == "capture":
             capture = _CaptureTransport()
@@ -297,13 +357,14 @@ class _DiscordCommandExecutor(CommandExecutor):
                 channel_id=self._channel_id,
                 user_msg_id=self._user_msg_id,
                 text=request.prompt,
-                resume_token=None,
+                resume_token=resume_token,
                 context=request.context,
                 reply_ref=self._reply_ref,
                 on_thread_known=self._on_thread_known,
                 engine_override=engine,
                 thread_id=self._thread_id,
                 show_resume_line=self._show_resume_line,
+                session_mode=self._session_mode,
                 run_options=run_options,
             )
             return RunResult(engine=engine, message=capture.last_message)
@@ -315,13 +376,14 @@ class _DiscordCommandExecutor(CommandExecutor):
             channel_id=self._channel_id,
             user_msg_id=self._user_msg_id,
             text=request.prompt,
-            resume_token=None,
+            resume_token=resume_token,
             context=request.context,
             reply_ref=self._reply_ref,
             on_thread_known=self._on_thread_known,
             engine_override=engine,
             thread_id=self._thread_id,
             show_resume_line=self._show_resume_line,
+            session_mode=self._session_mode,
             run_options=run_options,
         )
         return RunResult(engine=engine, message=None)

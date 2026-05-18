@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ import msgspec
 
 from .types import DiscordChannelContext, DiscordThreadContext
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 
 
 class DiscordChannelStateData(msgspec.Struct):
@@ -33,6 +34,7 @@ class DiscordState(msgspec.Struct):
     """Root state structure."""
 
     version: int = STATE_VERSION
+    cwd: str | None = None
     channels: dict[str, DiscordChannelStateData] = msgspec.field(default_factory=dict)
     guilds: dict[str, DiscordGuildData] = msgspec.field(default_factory=dict)
 
@@ -85,10 +87,29 @@ class DiscordStateStore:
         except Exception:  # noqa: BLE001
             self._state = DiscordState()
             return
-        # Handle migration from version 1 to 2.
+        # Handle migration from older versions.
         if payload.version < STATE_VERSION:
             payload = DiscordState(
                 version=STATE_VERSION,
+                cwd=None,
+                channels=payload.channels,
+                guilds=payload.guilds,
+            )
+            self._state = payload
+            self._save()
+            return
+        # Clear sessions when cwd changes to avoid resuming in wrong directory.
+        current_cwd = os.getcwd()
+        if payload.cwd is not None and payload.cwd != current_cwd:
+            cleared = 0
+            for key in list(payload.channels):
+                entry = payload.channels[key]
+                if entry.sessions:
+                    entry.sessions = None
+                    cleared += 1
+            payload = DiscordState(
+                version=STATE_VERSION,
+                cwd=current_cwd,
                 channels=payload.channels,
                 guilds=payload.guilds,
             )
@@ -98,6 +119,12 @@ class DiscordStateStore:
         self._state = payload
 
     def _save(self) -> None:
+        self._state = DiscordState(
+            version=STATE_VERSION,
+            cwd=os.getcwd(),
+            channels=self._state.channels,
+            guilds=self._state.guilds,
+        )
         payload = msgspec.to_builtins(self._state)
         _atomic_write_json(self._path, payload)
         self._mtime_ns = self._stat_mtime_ns()

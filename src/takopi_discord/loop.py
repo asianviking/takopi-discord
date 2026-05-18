@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Awaitable, Callable, Mapping
+import asyncio
+from collections import deque
+from collections.abc import Awaitable, Callable, Hashable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,8 +26,13 @@ from takopi.runners.run_options import EngineRunOptions, apply_run_options
 from takopi.transport import MessageRef, RenderedMessage, SendOptions
 
 from .allowlist import is_user_allowed
-from .bridge import CANCEL_BUTTON_ID, DiscordBridgeConfig, DiscordTransport
-from .commands import discover_command_ids, register_plugin_commands
+from .bridge import (
+    CANCEL_BUTTON_ID,
+    STEER_BUTTON_ID,
+    DiscordBridgeConfig,
+    DiscordTransport,
+)
+from .commands import dispatch_command, discover_command_ids, register_plugin_commands
 from .handlers import (
     extract_prompt_from_message,
     is_bot_mentioned,
@@ -41,6 +48,12 @@ from .overrides import (
 )
 from .prefs import DiscordPrefsStore
 from .render import prepare_discord
+from .resume import (
+    ResumeLineProxy,
+    should_render_context_line,
+    should_render_resume_line,
+)
+from .sessions import session_author_id, should_resume_session
 from .state import DiscordStateStore
 from .types import DiscordChannelContext, DiscordThreadContext
 from .voice_messages import WhisperAttachmentTranscriber, is_audio_attachment
@@ -51,6 +64,319 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["run_main_loop"]
+
+_SEEN_MESSAGES_LIMIT = 2048
+_SEEN_INTERACTIONS_LIMIT = 4096
+_PLUGIN_COMPONENT_PREFIX = "takopi-discord:command:"
+
+
+def _annotate_voice_prompt(prompt: str) -> str:
+    return f"(voice transcribed) {prompt}".strip()
+
+
+def _apply_resolved_message(
+    *,
+    prompt: str,
+    engine_id: str,
+    run_context: RunContext | None,
+    resume_token: ResumeToken | None,
+    resolved_msg: Any | None,
+    is_voice_transcribed: bool,
+) -> tuple[str, str, RunContext | None, ResumeToken | None]:
+    """Apply Takopi's directive/resume resolution to Discord message state."""
+    if resolved_msg is None:
+        if is_voice_transcribed:
+            prompt = _annotate_voice_prompt(prompt)
+        return prompt, engine_id, run_context, resume_token
+
+    resolved_prompt = resolved_msg.prompt if resolved_msg.prompt.strip() else prompt
+    if is_voice_transcribed:
+        prompt = _annotate_voice_prompt(resolved_prompt)
+    else:
+        prompt = resolved_prompt
+
+    if resolved_msg.context is not None:
+        run_context = resolved_msg.context
+
+    if resolved_msg.resume_token is not None:
+        resume_token = resolved_msg.resume_token
+        engine_id = resume_token.engine
+    elif resolved_msg.engine_override is not None:
+        engine_id = resolved_msg.engine_override
+
+    return prompt, engine_id, run_context, resume_token
+
+
+def _build_new_thread_context(
+    *,
+    run_context: RunContext | None,
+    channel_context: DiscordChannelContext | None,
+    engine_id: str,
+) -> DiscordThreadContext | None:
+    if run_context is None or run_context.project is None or run_context.branch is None:
+        return None
+    return DiscordThreadContext(
+        project=run_context.project,
+        branch=run_context.branch,
+        worktrees_dir=channel_context.worktrees_dir
+        if channel_context is not None
+        else ".worktrees",
+        default_engine=engine_id,
+    )
+
+
+async def _rename_thread_to_branch(thread: object, branch: str) -> bool:
+    edit = getattr(thread, "edit", None)
+    if not callable(edit):
+        return False
+    try:
+        await edit(name=branch)
+    except discord.HTTPException:
+        logger.warning("thread.rename_failed", branch=branch)
+        return False
+    return True
+
+
+async def _maybe_update_thread_context_from_directives(
+    *,
+    resolved_msg: Any | None,
+    state_store: DiscordStateStore | None,
+    guild_id: int | None,
+    thread_id: int | None,
+    thread_channel: object,
+    channel_context: DiscordChannelContext | None,
+    thread_context: DiscordThreadContext | None,
+    runtime: Any,
+) -> RunContext | None:
+    """Persist directive branch changes into an existing Discord thread.
+
+    Telegram topics persist directive-resolved context back onto the topic. For
+    Discord, the parent channel remains the project owner; directives inside a
+    thread may only rebind that thread's branch/worktree.
+    """
+    if (
+        resolved_msg is None
+        or getattr(resolved_msg, "context_source", None) != "directives"
+        or state_store is None
+        or guild_id is None
+        or thread_id is None
+        or channel_context is None
+    ):
+        return None
+
+    from takopi.context import RunContext
+
+    resolved_context = getattr(resolved_msg, "context", None)
+    branch = getattr(resolved_context, "branch", None)
+    if branch is None:
+        if thread_context is not None:
+            return RunContext(
+                project=channel_context.project,
+                branch=thread_context.branch,
+            )
+        return RunContext(
+            project=channel_context.project,
+            branch=channel_context.worktree_base,
+        )
+
+    run_context = RunContext(project=channel_context.project, branch=branch)
+    runtime.resolve_run_cwd(run_context)
+    new_thread_context = DiscordThreadContext(
+        project=channel_context.project,
+        branch=branch,
+        worktrees_dir=channel_context.worktrees_dir,
+        default_engine=thread_context.default_engine
+        if thread_context is not None
+        else channel_context.default_engine,
+    )
+    await state_store.set_context(guild_id, thread_id, new_thread_context)
+    await _rename_thread_to_branch(thread_channel, branch)
+    logger.info(
+        "thread.context_updated_from_directives",
+        guild_id=guild_id,
+        thread_id=thread_id,
+        project=channel_context.project,
+        branch=branch,
+    )
+    return run_context
+
+
+def _parse_plugin_component_custom_id(custom_id: str | None) -> tuple[str, str] | None:
+    """Parse a Discord component custom_id into a plugin command invocation.
+
+    Supported forms:
+    - "command:args" mirrors Telegram callback data.
+    - "takopi-discord:command:command:args" is the explicit Discord form.
+    """
+    if not custom_id or custom_id in {CANCEL_BUTTON_ID, STEER_BUTTON_ID}:
+        return None
+    if custom_id.startswith(_PLUGIN_COMPONENT_PREFIX):
+        payload = custom_id.removeprefix(_PLUGIN_COMPONENT_PREFIX)
+    elif custom_id.startswith("takopi-discord:"):
+        return None
+    else:
+        payload = custom_id
+    command_id, _, args_text = payload.partition(":")
+    command_id = command_id.strip().lower()
+    if not command_id:
+        return None
+    return command_id, args_text
+
+
+async def _dispatch_plugin_component_interaction(
+    *,
+    interaction: discord.Interaction,
+    custom_id: str | None,
+    cfg: DiscordBridgeConfig,
+    state_store: DiscordStateStore,
+    prefs_store: DiscordPrefsStore,
+    running_tasks: RunningTasks,
+    current_command_ids: set[str],
+    refresh_commands: Callable[[], set[str]],
+    default_engine_override: str | None,
+) -> bool:
+    parsed = _parse_plugin_component_custom_id(custom_id)
+    if parsed is None:
+        return False
+    command_id, args_text = parsed
+    command_ids = current_command_ids
+    if command_id not in command_ids:
+        command_ids = refresh_commands()
+    if command_id not in command_ids:
+        await interaction.response.defer()
+        return True
+
+    user_id = getattr(getattr(interaction, "user", None), "id", None)
+    if not isinstance(user_id, int):
+        user_id = None
+    if not is_user_allowed(cfg.allowed_user_ids, user_id):
+        await interaction.response.defer()
+        return True
+    if interaction.guild is None or interaction.channel_id is None:
+        await interaction.response.defer()
+        return True
+    if interaction.message is None:
+        await interaction.response.defer()
+        return True
+
+    from takopi.context import RunContext
+
+    guild_id = interaction.guild.id
+    parent_channel_id = interaction.channel_id
+    thread_id: int | None = None
+    if isinstance(interaction.channel, discord.Thread):
+        thread_id = interaction.channel_id
+        parent_channel_id = interaction.channel.parent_id or interaction.channel_id
+
+    channel_context: DiscordChannelContext | None = None
+    thread_context: DiscordThreadContext | None = None
+    if thread_id is not None:
+        ctx_data = await state_store.get_context(guild_id, thread_id)
+        if isinstance(ctx_data, DiscordThreadContext):
+            thread_context = ctx_data
+    ctx_data = await state_store.get_context(guild_id, parent_channel_id)
+    if isinstance(ctx_data, DiscordChannelContext):
+        channel_context = ctx_data
+
+    default_context: RunContext | None = None
+    if thread_context is not None:
+        default_context = RunContext(
+            project=thread_context.project,
+            branch=thread_context.branch,
+        )
+    elif channel_context is not None:
+        default_context = RunContext(
+            project=channel_context.project,
+            branch=channel_context.worktree_base,
+        )
+
+    async def engine_overrides_resolver(
+        engine_id: str,
+    ) -> EngineRunOptions | None:
+        overrides = await resolve_overrides(
+            prefs_store, guild_id, parent_channel_id, thread_id, engine_id
+        )
+        if overrides.model or overrides.reasoning:
+            return EngineRunOptions(
+                model=overrides.model,
+                reasoning=overrides.reasoning,
+            )
+        return None
+
+    session_key = thread_id if thread_id is not None else parent_channel_id
+    save_author_id = session_author_id(thread_id=thread_id, author_id=user_id)
+
+    async def on_thread_known(new_token: ResumeToken, _event: anyio.Event) -> None:
+        if not should_resume_session(cfg.session_mode, thread_id=thread_id):
+            return
+        await state_store.set_session(
+            guild_id,
+            session_key,
+            new_token.engine,
+            new_token.value,
+            author_id=save_author_id,
+        )
+
+    async def resume_token_resolver(engine_id: str) -> ResumeToken | None:
+        if not should_resume_session(cfg.session_mode, thread_id=thread_id):
+            return None
+        token_str = await state_store.get_session(
+            guild_id,
+            session_key,
+            engine_id,
+            author_id=save_author_id,
+        )
+        if token_str is None:
+            return None
+        return ResumeToken(engine=engine_id, value=token_str)
+
+    effective_channel_id = thread_id or parent_channel_id
+    message_id = interaction.message.id
+    await interaction.response.defer()
+
+    asyncio.create_task(
+        dispatch_command(
+            cfg,
+            command_id=command_id,
+            args_text=args_text,
+            full_text=custom_id or "",
+            channel_id=effective_channel_id,
+            message_id=message_id,
+            guild_id=guild_id,
+            thread_id=thread_id,
+            sender_id=user_id,
+            reply_ref=None,
+            reply_text=None,
+            running_tasks=running_tasks,
+            on_thread_known=on_thread_known,
+            default_engine_override=default_engine_override,
+            engine_overrides_resolver=engine_overrides_resolver,
+            default_context=default_context,
+            resume_token_resolver=resume_token_resolver,
+        ),
+        name=f"takopi-discord:component:{command_id}:{effective_channel_id}",
+    )
+    return True
+
+
+class _BoundedDeduper:
+    """Bounded insertion-order deduper for Discord retry deliveries."""
+
+    def __init__(self, *, limit: int) -> None:
+        self._limit = limit
+        self._seen: set[Hashable] = set()
+        self._order: deque[Hashable] = deque()
+
+    def add(self, key: Hashable) -> bool:
+        """Return True when key is new, False when it was already seen."""
+        if key in self._seen:
+            return False
+        self._seen.add(key)
+        self._order.append(key)
+        while len(self._order) > self._limit:
+            oldest = self._order.popleft()
+            self._seen.discard(oldest)
+        return True
 
 
 async def _send_startup(cfg: DiscordBridgeConfig, channel_id: int) -> None:
@@ -156,6 +482,67 @@ async def _send_plain_reply(
     )
 
 
+def _render_resume_progress(
+    cfg: DiscordBridgeConfig,
+    *,
+    resume_token: ResumeToken,
+    context: RunContext | None,
+    label: str,
+    thread_id: int | None = None,
+) -> RenderedMessage:
+    tracker = ProgressTracker(engine=resume_token.engine)
+    tracker.set_resume(resume_token)
+    context_line = (
+        cfg.runtime.format_context_line(context)
+        if should_render_context_line(thread_id=thread_id)
+        else None
+    )
+    resume_formatter = None
+    if should_render_resume_line(
+        cfg.session_mode,
+        thread_id=thread_id,
+        show_resume_line=cfg.show_resume_line,
+    ):
+        resume_formatter = cfg.runtime.resolve_runner(
+            resume_token=resume_token,
+            engine_override=None,
+        ).runner.format_resume
+    state = tracker.snapshot(
+        resume_formatter=resume_formatter,
+        context_line=context_line,
+    )
+    return cfg.exec_cfg.presenter.render_progress(
+        state,
+        elapsed_s=0.0,
+        label=label,
+    )
+
+
+async def _edit_queued_progress(
+    cfg: DiscordBridgeConfig,
+    *,
+    channel_id: int,
+    message_id: int,
+    job: ThreadJob,
+    label: str,
+) -> None:
+    rendered = _render_resume_progress(
+        cfg,
+        resume_token=job.resume_token,
+        context=job.context,
+        label=label,
+        thread_id=cast(int | None, job.thread_id),
+    )
+    await cfg.exec_cfg.transport.edit(
+        ref=MessageRef(
+            channel_id=channel_id,
+            message_id=message_id,
+            thread_id=cast(int | None, job.thread_id),
+        ),
+        message=rendered,
+    )
+
+
 async def _send_queued_progress(
     cfg: DiscordBridgeConfig,
     *,
@@ -164,19 +551,14 @@ async def _send_queued_progress(
     thread_id: int | None,
     resume_token: ResumeToken,
     context: RunContext | None,
+    steerable: bool,
 ) -> MessageRef | None:
-    tracker = ProgressTracker(engine=resume_token.engine)
-    tracker.set_resume(resume_token)
-    context_line = cfg.runtime.format_context_line(context)
-    state = tracker.snapshot(context_line=context_line)
-    queued = cfg.exec_cfg.presenter.render_progress(
-        state,
-        elapsed_s=0.0,
-        label="queued",
-    )
-    message = RenderedMessage(
-        text=queued.text,
-        extra={**queued.extra, "show_cancel": False},
+    message = _render_resume_progress(
+        cfg,
+        resume_token=resume_token,
+        context=context,
+        label="queued" if steerable else "starting",
+        thread_id=thread_id,
     )
     reply_ref = MessageRef(
         channel_id=channel_id,
@@ -229,6 +611,7 @@ async def send_with_resume(
         thread_id=thread_id,
         resume_token=resume,
         context=running_task.context,
+        steerable=not running_task.done.is_set(),
     )
     await enqueue(
         channel_id,
@@ -417,7 +800,7 @@ def _extract_engine_id_from_header(text: str | None) -> str | None:
 def _strip_ctx_lines(text: str | None) -> str | None:
     """Strip takopi context lines from bot messages.
 
-    Discord reply-to-continue needs the resume token in the referenced message, but
+    Reply-to-continue may use footer metadata from the referenced bot message, but
     we don't want to couple branching to context-line parsing (which can raise if
     config changes). Removing `ctx:` lines keeps resume extraction reliable.
     """
@@ -447,10 +830,12 @@ async def run_main_loop(
     state_store = DiscordStateStore(cfg.runtime.config_path)
     prefs_store = DiscordPrefsStore(cfg.runtime.config_path)
     await prefs_store.ensure_loaded()
-    _ = cast(DiscordTransport, cfg.exec_cfg.transport)  # Used for type checking only
     scheduler: ThreadScheduler | None = None
     resume_resolver: ResumeResolver | None = None
     media_buffer: MediaGroupBuffer | None = None
+
+    message_deduper = _BoundedDeduper(limit=_SEEN_MESSAGES_LIMIT)
+    interaction_deduper = _BoundedDeduper(limit=_SEEN_INTERACTIONS_LIMIT)
 
     # Initialize voice manager if OpenAI API key is available (needed for TTS)
     # STT uses local Whisper via pywhispercpp
@@ -481,11 +866,16 @@ async def run_main_loop(
         whisper_model = os.environ.get(
             "WHISPER_MODEL", cfg.voice_messages.whisper_model
         )
-        voice_attachment_transcriber = WhisperAttachmentTranscriber(whisper_model)
+        voice_attachment_transcriber = WhisperAttachmentTranscriber(
+            whisper_model,
+            base_url=cfg.voice_messages.voice_transcription_base_url,
+            api_key=cfg.voice_messages.voice_transcription_api_key,
+        )
         logger.info(
             "voice_messages.enabled",
             whisper_model=whisper_model,
             max_bytes=cfg.voice_messages.max_bytes,
+            remote=cfg.voice_messages.voice_transcription_base_url is not None,
         )
 
     logger.info(
@@ -504,8 +894,27 @@ async def run_main_loop(
                 return ref.message_id
         return None
 
-    async def cancel_task(channel_id: int) -> None:
-        """Cancel a running task in a channel."""
+    async def cancel_task(channel_id: int, *, message_id: int | None = None) -> None:
+        """Cancel a running or queued task in a channel."""
+        # Try to cancel a queued job first (via progress message id)
+        if message_id is not None and scheduler is not None:
+            job = await scheduler.cancel_queued(channel_id, message_id)
+            if job is not None:
+                await _edit_queued_progress(
+                    cfg,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    job=job,
+                    label="cancelled",
+                )
+                logger.info(
+                    "cancel.queued",
+                    channel_id=channel_id,
+                    progress_message_id=message_id,
+                    resume=job.resume_token.value if job.resume_token else None,
+                )
+                return
+        # Fall back to cancelling a running task
         for ref, task in list(running_tasks.items()):
             # ref is a MessageRef; check both channel_id and thread_id
             if ref.channel_id == channel_id or ref.thread_id == channel_id:
@@ -606,6 +1015,13 @@ async def run_main_loop(
                     issue=resolved.issue,
                 )
                 return
+            runner = resolved.runner
+            if not should_render_resume_line(
+                cfg.session_mode,
+                thread_id=thread_id,
+                show_resume_line=cfg.show_resume_line,
+            ):
+                runner = cast(Any, ResumeLineProxy(runner))
 
             # Resolve working directory
             try:
@@ -620,7 +1036,7 @@ async def run_main_loop(
                 run_fields = {
                     "chat_id": channel_id,
                     "user_msg_id": user_msg_id,
-                    "engine": resolved.runner.engine,
+                    "engine": runner.engine,
                     "resume": resume_token.value if resume_token else None,
                 }
                 if context is not None:
@@ -639,8 +1055,11 @@ async def run_main_loop(
                     thread_id=thread_id,
                 )
 
-                # Build context line if we have context
-                context_line = cfg.runtime.format_context_line(context)
+                context_line = (
+                    cfg.runtime.format_context_line(context)
+                    if should_render_context_line(thread_id=thread_id)
+                    else None
+                )
 
                 # Callback to save the resume token when it becomes known
                 async def on_thread_known(
@@ -655,22 +1074,28 @@ async def run_main_loop(
                         if len(new_token.value) > 20
                         else new_token.value,
                     )
-                    # Save to thread_id if present, otherwise channel_id
-                    # This matches the retrieval logic in handle_message
                     save_key = thread_id if thread_id else channel_id
-                    await _save_session_token(
-                        state_store=state_store,
-                        guild_id=guild_id,
-                        session_key=save_key,
-                        author_id=author_id,
-                        token=new_token,
+                    save_author_id = session_author_id(
+                        thread_id=thread_id, author_id=author_id
                     )
-                    if state_store and guild_id:
+                    if should_resume_session(cfg.session_mode, thread_id=thread_id):
+                        await _save_session_token(
+                            state_store=state_store,
+                            guild_id=guild_id,
+                            session_key=save_key,
+                            author_id=save_author_id,
+                            token=new_token,
+                        )
+                    if (
+                        state_store
+                        and guild_id
+                        and should_resume_session(cfg.session_mode, thread_id=thread_id)
+                    ):
                         logger.info(
                             "session.saved",
                             guild_id=guild_id,
                             session_key=save_key,
-                            author_id=author_id,
+                            author_id=save_author_id,
                             engine_id=new_token.engine,
                         )
                     else:
@@ -685,7 +1110,7 @@ async def run_main_loop(
                 with apply_run_options(run_options):
                     await takopi_handle_message(
                         cfg.exec_cfg,
-                        runner=resolved.runner,
+                        runner=runner,
                         incoming=incoming,
                         resume_token=resume_token,
                         context=context,
@@ -867,6 +1292,19 @@ async def run_main_loop(
 
     async def handle_message(message: discord.Message) -> None:
         """Handle an incoming Discord message."""
+        # Deduplicate: drop duplicate MESSAGE_CREATE events
+        message_id = getattr(message, "id", None)
+        if message.guild is not None and isinstance(message_id, int):
+            key = (message.guild.id, message_id)
+            if not message_deduper.add(key):
+                logger.debug(
+                    "message.ignored",
+                    reason="duplicate_message",
+                    guild_id=message.guild.id,
+                    message_id=message_id,
+                )
+                return
+
         logger.debug(
             "message.raw",
             channel_type=type(message.channel).__name__,
@@ -1074,7 +1512,10 @@ async def run_main_loop(
                 transcript_length=len(transcript),
             )
             prompt = transcript
+            is_voice_transcribed = True
             attachments_for_files = non_audio_attachments
+        else:
+            is_voice_transcribed = False
 
         # Allow empty prompt if @branch was used or if there are attachments (for auto_put)
         has_attachments = bool(message.attachments)
@@ -1250,6 +1691,8 @@ async def run_main_loop(
 
         # Prefer an explicit resume token (from message text or replied-to bot message)
         # over any stored "latest token".
+        from takopi.directives import DirectiveError
+
         try:
             resolved_msg = cfg.runtime.resolve_message(
                 text=prompt,
@@ -1257,6 +1700,9 @@ async def run_main_loop(
                 ambient_context=run_context,
                 chat_id=session_key,
             )
+        except DirectiveError as exc:
+            await message.reply(f"error:\n{exc}", mention_author=False)
+            return
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "resume.resolve_failed",
@@ -1265,26 +1711,70 @@ async def run_main_loop(
             )
             resolved_msg = None
 
+        prompt, engine_id, run_context, resume_token = _apply_resolved_message(
+            prompt=prompt,
+            engine_id=engine_id,
+            run_context=run_context,
+            resume_token=resume_token,
+            resolved_msg=resolved_msg,
+            is_voice_transcribed=is_voice_transcribed,
+        )
+        if not is_new_thread and thread_id is not None:
+            from takopi.config import ConfigError
+
+            try:
+                directive_context = await _maybe_update_thread_context_from_directives(
+                    resolved_msg=resolved_msg,
+                    state_store=state_store,
+                    guild_id=guild_id,
+                    thread_id=thread_id,
+                    thread_channel=message.channel,
+                    channel_context=channel_context,
+                    thread_context=thread_context,
+                    runtime=cfg.runtime,
+                )
+            except ConfigError as exc:
+                await message.reply(f"error:\n{exc}", mention_author=False)
+                return
+            if directive_context is not None:
+                run_context = directive_context
         if resolved_msg is not None and resolved_msg.resume_token is not None:
-            resume_token = resolved_msg.resume_token
-            engine_id = resume_token.engine
             logger.debug(
                 "resume.extracted_from_reply",
                 engine_id=engine_id,
                 source="reply" if reply_text else "message",
             )
 
+        if is_new_thread and thread_id is not None and state_store and guild_id:
+            new_thread_context = _build_new_thread_context(
+                run_context=run_context,
+                channel_context=channel_context,
+                engine_id=engine_id,
+            )
+            if new_thread_context is not None:
+                await state_store.set_context(guild_id, thread_id, new_thread_context)
+                logger.info(
+                    "thread.context_saved",
+                    thread_id=thread_id,
+                    project=new_thread_context.project,
+                    branch=new_thread_context.branch,
+                    default_engine=new_thread_context.default_engine,
+                )
+
         if (
             resume_token is None
             and state_store
             and guild_id
-            and cfg.session_mode == "chat"
+            and should_resume_session(cfg.session_mode, thread_id=thread_id)
         ):
+            lookup_author_id = session_author_id(
+                thread_id=thread_id, author_id=author_id
+            )
             token_str = await state_store.get_session(
                 guild_id,
                 session_key,
                 engine_id,
-                author_id=author_id,
+                author_id=lookup_author_id,
             )
             if token_str:
                 resume_token = ResumeToken(engine=engine_id, value=token_str)
@@ -1292,7 +1782,7 @@ async def run_main_loop(
                     "session.restored",
                     guild_id=guild_id,
                     session_key=session_key,
-                    author_id=author_id,
+                    author_id=lookup_author_id,
                     engine_id=engine_id,
                     token_preview=token_str[:20] + "..."
                     if len(token_str) > 20
@@ -1303,7 +1793,7 @@ async def run_main_loop(
                     "session.not_found",
                     guild_id=guild_id,
                     session_key=session_key,
-                    author_id=author_id,
+                    author_id=lookup_author_id,
                     engine_id=engine_id,
                 )
 
@@ -1474,9 +1964,10 @@ async def run_main_loop(
         # current task's resume token is ready, then executed with full context.
         # Also queue any message that resumes an existing thread to avoid
         # overlapping runs for the same conversation.
+        scoped_author_id = session_author_id(thread_id=thread_id, author_id=author_id)
         session_meta: tuple[int, int | None] | tuple[int, int | None, int] = (
-            (guild_id, channel_id, author_id)
-            if author_id is not None
+            (guild_id, channel_id, scoped_author_id)
+            if scoped_author_id is not None
             else (guild_id, channel_id)
         )
         if resume_resolver is not None:
@@ -1499,6 +1990,7 @@ async def run_main_loop(
             resume_token = decision.resume_token
 
         if resume_token is not None and scheduler is not None:
+            steerable = await scheduler.is_busy(resume_token)
             progress_ref = await _send_queued_progress(
                 cfg,
                 channel_id=job_channel_id,
@@ -1506,6 +1998,7 @@ async def run_main_loop(
                 thread_id=thread_id,
                 resume_token=resume_token,
                 context=run_context,
+                steerable=steerable,
             )
             await scheduler.enqueue_resume(
                 job_channel_id,
@@ -1557,9 +2050,18 @@ async def run_main_loop(
     # Set up message handler
     cfg.bot.set_message_handler(handle_message)
 
-    # Handle cancel button interactions
+    # Handle cancel and steer button interactions
     @cfg.bot.bot.event
     async def on_interaction(interaction: discord.Interaction) -> None:
+        # Deduplicate interactions (Discord can redeliver on retries)
+        if interaction.id is not None and not interaction_deduper.add(interaction.id):
+            logger.debug(
+                "interaction.ignored",
+                reason="duplicate_interaction",
+                interaction_id=interaction.id,
+            )
+            return
+
         # Handle component interactions (buttons)
         if interaction.type == discord.InteractionType.component:
             if interaction.data:
@@ -1571,11 +2073,80 @@ async def run_main_loop(
                     if not is_user_allowed(cfg.allowed_user_ids, user_id):
                         await interaction.response.defer()
                         return
-                    # Get the channel where the cancel was clicked
                     channel_id = interaction.channel_id
+                    message_id = interaction.message.id if interaction.message else None
                     if channel_id is not None:
-                        await cancel_task(channel_id)
+                        await cancel_task(
+                            channel_id,
+                            message_id=message_id,
+                        )
                     await interaction.response.defer()
+                    return
+                if custom_id == STEER_BUTTON_ID:
+                    user_id = getattr(getattr(interaction, "user", None), "id", None)
+                    if not isinstance(user_id, int):
+                        user_id = None
+                    if not is_user_allowed(cfg.allowed_user_ids, user_id):
+                        await interaction.response.defer()
+                        return
+                    channel_id = interaction.channel_id
+                    message_id = interaction.message.id if interaction.message else None
+                    if (
+                        channel_id is not None
+                        and message_id is not None
+                        and scheduler is not None
+                    ):
+                        job = await scheduler.get_queued(channel_id, message_id)
+                        if job is None:
+                            await interaction.response.defer()
+                            return
+                        # Find active turn control for this resume token
+                        control = None
+                        for running_task in running_tasks.values():
+                            if running_task.resume == job.resume_token:
+                                control = running_task.control
+                                break
+                        if control is None:
+                            await interaction.response.defer()
+                            return
+                        claimed = await scheduler.claim_queued(channel_id, message_id)
+                        if claimed is None:
+                            await interaction.response.defer()
+                            return
+                        try:
+                            await control.steer(claimed.text)
+                        except Exception as exc:  # noqa: BLE001
+                            await scheduler.requeue_front(claimed)
+                            logger.warning(
+                                "steer.failed",
+                                channel_id=channel_id,
+                                message_id=message_id,
+                                error=str(exc),
+                                error_type=exc.__class__.__name__,
+                            )
+                            await interaction.response.defer()
+                            return
+                        await _edit_queued_progress(
+                            cfg,
+                            channel_id=channel_id,
+                            message_id=message_id,
+                            job=claimed,
+                            label="steered",
+                        )
+                        await interaction.response.defer()
+                        return
+                if await _dispatch_plugin_component_interaction(
+                    interaction=interaction,
+                    custom_id=custom_id,
+                    cfg=cfg,
+                    state_store=state_store,
+                    prefs_store=prefs_store,
+                    running_tasks=running_tasks,
+                    current_command_ids=current_command_ids,
+                    refresh_commands=refresh_commands,
+                    default_engine_override=default_engine_override,
+                ):
+                    return
             return
 
         # For application commands, let Pycord handle them
@@ -1660,7 +2231,11 @@ async def run_main_loop(
                 # Get resume token for the text channel
                 resume_token: ResumeToken | None = None
                 engine_id = cfg.runtime.default_engine or "claude"
-                if cfg.session_mode == "chat":
+                text_thread_id = None
+                text_context = await state_store.get_context(guild_id, text_channel_id)
+                if isinstance(text_context, DiscordThreadContext):
+                    text_thread_id = text_channel_id
+                if should_resume_session(cfg.session_mode, thread_id=text_thread_id):
                     token_str = await state_store.get_session(
                         guild_id, text_channel_id, engine_id
                     )
@@ -1676,11 +2251,11 @@ async def run_main_loop(
                 await run_job(
                     channel_id=text_channel_id,
                     user_msg_id=voice_msg_id,
-                    text=transcript,
+                    text=_annotate_voice_prompt(transcript),
                     resume_token=resume_token,
                     context=run_context,
                     engine_id=engine_id,
-                    thread_id=None,
+                    thread_id=text_thread_id,
                     reply_ref=None,
                     guild_id=guild_id,
                 )

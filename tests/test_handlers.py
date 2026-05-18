@@ -1,10 +1,15 @@
 """Tests for handlers module."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+import takopi_discord.handlers as handlers
 from takopi_discord.handlers import (
     _format_engine_starter_message,
     parse_branch_prefix,
+    register_slash_commands,
     should_process_message,
 )
 
@@ -103,3 +108,53 @@ class TestFormatEngineStarterMessage:
         assert msg.startswith("/codex ")
         assert msg.endswith("…")
         assert len(msg) <= 20
+
+
+class DummyThread:
+    pass
+
+
+@pytest.mark.anyio
+async def test_new_command_clears_shared_thread_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(handlers.discord, "Thread", DummyThread)
+
+    commands = {}
+
+    def slash_command(*, name: str, description: str):
+        def decorator(func):
+            commands[name] = func
+            return func
+
+        return decorator
+
+    bot = MagicMock()
+    bot.bot.slash_command = slash_command
+
+    state_store = MagicMock()
+    state_store.clear_sessions = AsyncMock()
+
+    register_slash_commands(
+        bot,
+        state_store=state_store,
+        prefs_store=MagicMock(),
+        get_running_task=MagicMock(return_value=None),
+        cancel_task=AsyncMock(),
+    )
+
+    ctx = MagicMock()
+    ctx.guild = MagicMock()
+    ctx.guild.id = 1
+    ctx.channel_id = 99
+    ctx.channel = DummyThread()
+    ctx.author = MagicMock()
+    ctx.author.id = 42
+    ctx.respond = AsyncMock()
+
+    await commands["new"](ctx)
+
+    state_store.clear_sessions.assert_awaited_once_with(1, 99, author_id=None)
+    ctx.respond.assert_awaited_once_with(
+        "Session cleared. Starting fresh.", ephemeral=True
+    )

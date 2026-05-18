@@ -1,8 +1,8 @@
 """Session-scope helpers for Discord transport.
 
-``session_mode`` decides where the server-side resume store applies. The
-reply-chain resume mechanism (visible resume line + reply parsing) works in
-every mode and is orthogonal to this setting.
+``session_mode`` decides where the server-side resume store applies. Discord
+thread sessions store resume tokens server-side, so visible resume lines are
+only needed for reply-chain scopes outside those stored sessions.
 
 - ``stateless`` — no server-side resume anywhere. Persistence lives in the
   chat history (replies). Matches upstream Telegram semantics.

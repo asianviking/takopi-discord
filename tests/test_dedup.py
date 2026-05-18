@@ -57,10 +57,14 @@ class _FakeRunner:
 
 
 class _FakeRuntime:
+    def __init__(self) -> None:
+        self.resolve_calls = 0
+
     def format_context_line(self, context):
         return None
 
     def resolve_runner(self, *, resume_token, engine_override):
+        self.resolve_calls += 1
         return SimpleNamespace(runner=_FakeRunner())
 
 
@@ -141,6 +145,33 @@ async def test_send_queued_progress_only_marks_steerable_when_busy() -> None:
     assert transport.sent[0].extra["show_steer"] is False
     assert transport.sent[1].text == "queued"
     assert transport.sent[1].extra["show_steer"] is True
+
+
+@pytest.mark.anyio
+async def test_send_queued_progress_hides_resume_line_in_thread_session() -> None:
+    transport = _FakeTransport()
+    runtime = _FakeRuntime()
+    cfg = SimpleNamespace(
+        runtime=runtime,
+        exec_cfg=SimpleNamespace(
+            presenter=_FakeProgressPresenter(),
+            transport=transport,
+        ),
+        show_resume_line=True,
+        session_mode="thread",
+    )
+
+    await _send_queued_progress(
+        cfg,
+        channel_id=1,
+        user_msg_id=2,
+        thread_id=10,
+        resume_token=ResumeToken(engine="codex", value="resume-token"),
+        context=None,
+        steerable=True,
+    )
+
+    assert runtime.resolve_calls == 0
 
 
 @pytest.mark.anyio

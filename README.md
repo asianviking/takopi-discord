@@ -56,7 +56,7 @@ bot_token = "..."                # Required: Discord bot token
 guild_id = 123456789             # Optional: restrict bot to single server
 message_overflow = "split"       # "split" (default) or "trim" for long messages
 session_mode = "thread"          # "thread" (default) or "stateless"; "chat" aliases "thread"
-show_resume_line = true          # Show resume token in messages (default: true)
+show_resume_line = true          # Show resume token outside thread sessions (default: true)
 trigger_mode_default = "all"     # "all" (default) or "mentions" for inherited trigger mode
 # allowed_user_ids = [123456789012345678]      # Optional: restrict human bot usage (Discord user IDs)
 # allowed_bot_user_ids = [987654321098765432]  # Optional: trusted bot senders allowed to trigger Takopi
@@ -191,7 +191,7 @@ Discord thread name is updated to the branch name.
 ### Thread Sessions
 
 - Messages in channels automatically create threads
-- Each thread maintains its own session with resume tokens
+- Each thread maintains its own server-side session with resume tokens
 - Multiple sessions can run simultaneously across threads
 - `session_mode = "stateless"` disables server-side resume; reply-chain resume
   still works. Legacy `session_mode = "chat"` is treated the same as `thread`.

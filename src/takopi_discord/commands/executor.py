@@ -23,7 +23,7 @@ from takopi.transport_runtime import TransportRuntime
 from takopi.utils.paths import reset_run_base_dir, set_run_base_dir
 
 from ..overrides import supports_reasoning
-from ..sessions import should_resume_session
+from ..resume import ResumeLineProxy, should_render_resume_line
 
 if TYPE_CHECKING:
     pass
@@ -80,29 +80,6 @@ def _reasoning_warning(
         ok=True,
         message=message,
     )
-
-
-@dataclass(slots=True)
-class _ResumeLineProxy:
-    """Proxy runner that suppresses resume line output."""
-
-    runner: Runner
-
-    @property
-    def engine(self) -> str:
-        return self.runner.engine
-
-    def is_resume_line(self, line: str) -> bool:
-        return self.runner.is_resume_line(line)
-
-    def format_resume(self, _: ResumeToken) -> str:
-        return ""
-
-    def extract_resume(self, text: str | None) -> ResumeToken | None:
-        return self.runner.extract_resume(text)
-
-    def run(self, prompt: str, resume: ResumeToken | None):
-        return self.runner.run(prompt, resume)
 
 
 class _CaptureTransport:
@@ -168,11 +145,13 @@ async def _run_engine(
             engine_override=engine_override,
         )
         runner: Runner = entry.runner
-        effective_show_resume_line = show_resume_line or not should_resume_session(
-            session_mode, thread_id=thread_id
+        effective_show_resume_line = should_render_resume_line(
+            session_mode,
+            thread_id=thread_id,
+            show_resume_line=show_resume_line,
         )
         if not effective_show_resume_line:
-            runner = cast(Runner, _ResumeLineProxy(runner))
+            runner = cast(Runner, ResumeLineProxy(runner))
         warning = _reasoning_warning(engine=runner.engine, run_options=run_options)
         if warning is not None:
             runner = cast(Runner, _PreludeRunner(runner, [warning]))

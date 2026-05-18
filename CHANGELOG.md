@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Inside a thread, the session resume key drops `author_id` so all thread participants share one session. Channel scope stays reply-chain only under canonical `session_mode = "thread"`.
+- Discord thread/chat-mode messages suppress the visible resume-token line; the `ctx:` line remains visible for project/branch context.
 
 ## [0.5.1] - 2026-05-16
 

@@ -48,6 +48,7 @@ from .overrides import (
 )
 from .prefs import DiscordPrefsStore
 from .render import prepare_discord
+from .resume import ResumeLineProxy, should_render_resume_line
 from .sessions import session_author_id, should_resume_session
 from .state import DiscordStateStore
 from .types import DiscordChannelContext, DiscordThreadContext
@@ -493,8 +494,10 @@ def _render_resume_progress(
     tracker.set_resume(resume_token)
     context_line = cfg.runtime.format_context_line(context)
     resume_formatter = None
-    if cfg.show_resume_line or not should_resume_session(
-        cfg.session_mode, thread_id=thread_id
+    if should_render_resume_line(
+        cfg.session_mode,
+        thread_id=thread_id,
+        show_resume_line=cfg.show_resume_line,
     ):
         resume_formatter = cfg.runtime.resolve_runner(
             resume_token=resume_token,
@@ -1008,6 +1011,13 @@ async def run_main_loop(
                     issue=resolved.issue,
                 )
                 return
+            runner = resolved.runner
+            if not should_render_resume_line(
+                cfg.session_mode,
+                thread_id=thread_id,
+                show_resume_line=cfg.show_resume_line,
+            ):
+                runner = cast(Any, ResumeLineProxy(runner))
 
             # Resolve working directory
             try:
@@ -1022,7 +1032,7 @@ async def run_main_loop(
                 run_fields = {
                     "chat_id": channel_id,
                     "user_msg_id": user_msg_id,
-                    "engine": resolved.runner.engine,
+                    "engine": runner.engine,
                     "resume": resume_token.value if resume_token else None,
                 }
                 if context is not None:
@@ -1093,7 +1103,7 @@ async def run_main_loop(
                 with apply_run_options(run_options):
                     await takopi_handle_message(
                         cfg.exec_cfg,
-                        runner=resolved.runner,
+                        runner=runner,
                         incoming=incoming,
                         resume_token=resume_token,
                         context=context,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from takopi_discord.resume import should_render_resume_line
 from takopi_discord.sessions import (
     normalize_session_mode,
     session_author_id,
@@ -38,6 +39,41 @@ class TestShouldResumeSession:
     def test_thread_mode_resumes_only_in_thread(self) -> None:
         assert should_resume_session("thread", thread_id=42) is True
         assert should_resume_session("thread", thread_id=None) is False
+
+
+class TestShouldRenderResumeLine:
+    @pytest.mark.parametrize("session_mode", ["thread", "chat"])
+    def test_hides_resume_line_inside_thread_session(
+        self, session_mode: str
+    ) -> None:
+        assert (
+            should_render_resume_line(
+                session_mode,
+                thread_id=42,
+                show_resume_line=True,
+            )
+            is False
+        )
+
+    def test_shows_resume_line_outside_thread_when_enabled(self) -> None:
+        assert (
+            should_render_resume_line(
+                "thread",
+                thread_id=None,
+                show_resume_line=True,
+            )
+            is True
+        )
+
+    def test_respects_disabled_resume_line_outside_thread(self) -> None:
+        assert (
+            should_render_resume_line(
+                "stateless",
+                thread_id=None,
+                show_resume_line=False,
+            )
+            is False
+        )
 
 
 class TestSessionAuthorId:

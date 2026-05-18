@@ -43,9 +43,7 @@ class TestShouldResumeSession:
 
 class TestShouldRenderResumeLine:
     @pytest.mark.parametrize("session_mode", ["thread", "chat"])
-    def test_hides_resume_line_inside_thread_session(
-        self, session_mode: str
-    ) -> None:
+    def test_hides_resume_line_inside_thread_session(self, session_mode: str) -> None:
         assert (
             should_render_resume_line(
                 session_mode,

@@ -561,9 +561,7 @@ def register_slash_commands(
         author_id = getattr(getattr(ctx, "author", None), "id", None)
         if not isinstance(author_id, int):
             author_id = None
-        scoped_author_id = session_author_id(
-            thread_id=thread_id, author_id=author_id
-        )
+        scoped_author_id = session_author_id(thread_id=thread_id, author_id=author_id)
         await state_store.clear_sessions(
             guild_id, channel_id, author_id=scoped_author_id
         )
@@ -1585,9 +1583,7 @@ async def _handle_engine_command(
     if not isinstance(author_id, int):
         author_id = None
     session_key = thread_id if thread_id is not None else channel_id
-    scoped_author_id = session_author_id(
-        thread_id=thread_id, author_id=author_id
-    )
+    scoped_author_id = session_author_id(thread_id=thread_id, author_id=author_id)
     if should_resume_session(cfg.session_mode, thread_id=thread_id):
         token_str = await state_store.get_session(
             guild_id,

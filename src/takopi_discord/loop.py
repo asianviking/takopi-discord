@@ -113,11 +113,7 @@ def _build_new_thread_context(
     channel_context: DiscordChannelContext | None,
     engine_id: str,
 ) -> DiscordThreadContext | None:
-    if (
-        run_context is None
-        or run_context.project is None
-        or run_context.branch is None
-    ):
+    if run_context is None or run_context.project is None or run_context.branch is None:
         return None
     return DiscordThreadContext(
         project=run_context.project,
@@ -1968,9 +1964,7 @@ async def run_main_loop(
         # current task's resume token is ready, then executed with full context.
         # Also queue any message that resumes an existing thread to avoid
         # overlapping runs for the same conversation.
-        scoped_author_id = session_author_id(
-            thread_id=thread_id, author_id=author_id
-        )
+        scoped_author_id = session_author_id(thread_id=thread_id, author_id=author_id)
         session_meta: tuple[int, int | None] | tuple[int, int | None, int] = (
             (guild_id, channel_id, scoped_author_id)
             if scoped_author_id is not None

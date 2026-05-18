@@ -254,9 +254,7 @@ async def _handle_plugin_command(
 
     message_id = starter_msg.message_id
     session_key = thread_id if thread_id is not None else channel_id
-    scoped_author_id = session_author_id(
-        thread_id=thread_id, author_id=author_id
-    )
+    scoped_author_id = session_author_id(thread_id=thread_id, author_id=author_id)
 
     async def on_thread_known(new_token: ResumeToken, _event: anyio.Event) -> None:
         if not should_resume_session(cfg.session_mode, thread_id=thread_id):

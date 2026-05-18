@@ -36,9 +36,7 @@ def should_resume_session(session_mode: str, *, thread_id: int | None) -> bool:
     return normalize_session_mode(session_mode) == "thread" and thread_id is not None
 
 
-def session_author_id(
-    *, thread_id: int | None, author_id: int | None
-) -> int | None:
+def session_author_id(*, thread_id: int | None, author_id: int | None) -> int | None:
     """Per-author isolation only applies to channel scope.
 
     A thread is a shared work item; all participants contribute to the same

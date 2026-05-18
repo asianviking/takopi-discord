@@ -153,9 +153,7 @@ async def test_plugin_command_in_bound_channel_creates_thread(
     )
     token = await kwargs["resume_token_resolver"]("codex")
     assert token == ResumeToken(engine="codex", value="tok-thread")
-    state_store.get_session.assert_awaited_once_with(
-        1, 99, "codex", author_id=None
-    )
+    state_store.get_session.assert_awaited_once_with(1, 99, "codex", author_id=None)
     await kwargs["on_thread_known"](ResumeToken(engine="codex", value="tok-new"), None)
     state_store.set_session.assert_awaited_once_with(
         1, 99, "codex", "tok-new", author_id=None

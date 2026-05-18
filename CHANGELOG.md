@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-18
+
 ### Added
 - `session_mode = "thread"` (new default): server-side resume scoped to Discord threads, channels stay reply-chain only. Reflects the Discord UX where a thread is one work item. Existing `"stateless"` keeps no server-side resume anywhere; legacy `"chat"` is accepted as an alias for `"thread"`.
 
